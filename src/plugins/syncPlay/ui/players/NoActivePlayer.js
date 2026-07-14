@@ -115,6 +115,11 @@ class NoActivePlayer extends SyncPlay.Players.GenericPlayer {
      * Overrides PlaybackManager's playPause method.
      */
     playPauseRequest() {
+        if (!syncPlayManager.isPlaybackControlAllowed()) {
+            syncPlayManager.notifyPlaybackControlDenied();
+            return;
+        }
+
         const controller = syncPlayManager.getController();
         controller.playPause();
     }
@@ -123,6 +128,11 @@ class NoActivePlayer extends SyncPlay.Players.GenericPlayer {
      * Overrides PlaybackManager's unpause method.
      */
     unpauseRequest() {
+        if (!syncPlayManager.isPlaybackControlAllowed()) {
+            syncPlayManager.notifyPlaybackControlDenied();
+            return;
+        }
+
         const controller = syncPlayManager.getController();
         controller.unpause();
     }
@@ -131,6 +141,11 @@ class NoActivePlayer extends SyncPlay.Players.GenericPlayer {
      * Overrides PlaybackManager's pause method.
      */
     pauseRequest() {
+        if (!syncPlayManager.isPlaybackControlAllowed()) {
+            syncPlayManager.notifyPlaybackControlDenied();
+            return;
+        }
+
         const controller = syncPlayManager.getController();
         controller.pause();
     }
@@ -139,6 +154,11 @@ class NoActivePlayer extends SyncPlay.Players.GenericPlayer {
      * Overrides PlaybackManager's seek method.
      */
     seekRequest(positionTicks) {
+        if (!syncPlayManager.isPlaybackControlAllowed()) {
+            syncPlayManager.notifyPlaybackControlDenied();
+            return;
+        }
+
         const controller = syncPlayManager.getController();
         controller.seek(positionTicks);
     }

@@ -114,6 +114,8 @@ class PlaybackCore {
     onReady() {
         this.playerIsBuffering = false;
         this.sendBufferingRequest(false);
+        console.debug('SyncPlay onReady: local client is done buffering.');
+        // Consumed by Manager/UI (e.g. SyncPlayMenu) to clear per-participant buffering indicators.
         Events.trigger(this.manager, 'ready');
     }
 
@@ -123,6 +125,8 @@ class PlaybackCore {
     onBuffering() {
         this.playerIsBuffering = true;
         this.sendBufferingRequest(true);
+        console.debug('SyncPlay onBuffering: local client is buffering, notifying group.');
+        // Consumed by Manager/UI (e.g. SyncPlayMenu) to surface a per-participant buffering indicator.
         Events.trigger(this.manager, 'buffering');
     }
 

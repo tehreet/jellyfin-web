@@ -3,12 +3,14 @@ import { SyncPlayUserAccessType } from '@jellyfin/sdk/lib/generated-client/model
 import { getSyncPlayApi } from '@jellyfin/sdk/lib/utils/api/sync-play-api';
 import ContentCopy from '@mui/icons-material/ContentCopy';
 import GroupAdd from '@mui/icons-material/GroupAdd';
+import Person from '@mui/icons-material/Person';
 import PersonAdd from '@mui/icons-material/PersonAdd';
 import PersonOff from '@mui/icons-material/PersonOff';
 import PersonRemove from '@mui/icons-material/PersonRemove';
 import PlayCircle from '@mui/icons-material/PlayCircle';
 import StopCircle from '@mui/icons-material/StopCircle';
 import Tune from '@mui/icons-material/Tune';
+import CircularProgress from '@mui/material/CircularProgress';
 import Divider from '@mui/material/Divider';
 import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
@@ -16,7 +18,7 @@ import ListSubheader from '@mui/material/ListSubheader';
 import Menu, { MenuProps } from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import type { ApiClient } from 'jellyfin-apiclient';
-import React, { FC, useCallback, useEffect, useState } from 'react';
+import React, { FC, useCallback, useEffect, useRef, useState } from 'react';
 
 import { pluginManager } from 'components/pluginManager';
 import toast from 'components/toast/toast';
@@ -42,7 +44,236 @@ interface SyncPlayInstance {
         isPlaylistEmpty: () => boolean
         haltGroupPlayback: (apiClient: ApiClient) => void
         resumeGroupPlayback: (apiClient: ApiClient) => void
+        getHostUsername: () => string | null
+        isLocalClientBuffering: () => boolean
+        isGroupBuffering: () => boolean
     }
+}
+
+/**
+ * Gets the secondary line shown under a participant's name in the SyncPlay menu.
+ */
+function getParticipantSecondaryText(isBuffering: boolean, isHost: boolean): string | undefined {
+    if (isBuffering) {
+        return globalize.translate('LabelSyncPlayBuffering');
+    }
+    if (isHost) {
+        return globalize.translate('LabelSyncPlayHost');
+    }
+    return undefined;
+}
+
+/**
+ * Tracks buffering state for the SyncPlay menu: whether the local client is buffering
+ * (accurate, reported by the local player) and whether the group as a whole is waiting
+ * on someone to buffer (the server does not say who). Also surfaces a one-shot toast
+ * when the group starts stalling, so users get an answer to "why are we frozen" without
+ * needing to open the menu.
+ */
+function useSyncPlayBufferingState(syncPlay: SyncPlayInstance | undefined, enabled: boolean, username: string | null | undefined) {
+    const [ selfBuffering, setSelfBuffering ] = useState(false);
+    const [ groupBuffering, setGroupBuffering ] = useState(false);
+    const wasBufferingRef = useRef(false);
+
+    useEffect(() => {
+        if (!syncPlay || !enabled) {
+            setSelfBuffering(false);
+            setGroupBuffering(false);
+            return;
+        }
+
+        setSelfBuffering(syncPlay.Manager.isLocalClientBuffering());
+        setGroupBuffering(syncPlay.Manager.isGroupBuffering());
+
+        const onSelfBuffering = () => setSelfBuffering(true);
+        const onSelfReady = () => setSelfBuffering(false);
+        const onGroupStateUpdate = (_e: Event, state: string, reason: string) => {
+            setGroupBuffering(state === 'Waiting' && reason === 'Buffer');
+        };
+
+        Events.on(syncPlay.Manager, 'buffering', onSelfBuffering);
+        Events.on(syncPlay.Manager, 'ready', onSelfReady);
+        Events.on(syncPlay.Manager, 'group-state-update', onGroupStateUpdate);
+
+        return () => {
+            Events.off(syncPlay.Manager, 'buffering', onSelfBuffering);
+            Events.off(syncPlay.Manager, 'ready', onSelfReady);
+            Events.off(syncPlay.Manager, 'group-state-update', onGroupStateUpdate);
+        };
+    }, [ syncPlay, enabled ]);
+
+    useEffect(() => {
+        const isBuffering = selfBuffering || groupBuffering;
+
+        if (isBuffering && !wasBufferingRef.current) {
+            toast(
+                selfBuffering ?
+                    globalize.translate('MessageSyncPlayGroupWait', username ?? '') :
+                    globalize.translate('MessageSyncPlayGroupWaitOthers')
+            );
+        }
+
+        wasBufferingRef.current = isBuffering;
+    }, [ selfBuffering, groupBuffering, username ]);
+
+    return { selfBuffering, groupBuffering };
+}
+
+/**
+ * Builds the per-participant rows for the SyncPlay menu, including a per-user buffering
+ * spinner (accurate only for the local participant, since the server does not report
+ * per-participant buffering state) and a generic "someone is buffering" row otherwise.
+ */
+function buildParticipantMenuItems(
+    participants: string[],
+    hostUsername: string | null,
+    localUsername: string | null | undefined,
+    selfBuffering: boolean,
+    groupBuffering: boolean
+) {
+    const items = participants.map(participant => {
+        const isSelf = participant === localUsername;
+        const isHost = participant === hostUsername;
+        const isParticipantBuffering = isSelf && selfBuffering;
+
+        return (
+            <MenuItem
+                key={`sync-play-participant-${participant}`}
+                disabled
+            >
+                <ListItemIcon>
+                    {isParticipantBuffering ? <CircularProgress size={20} /> : <Person />}
+                </ListItemIcon>
+                <ListItemText
+                    primary={participant}
+                    secondary={getParticipantSecondaryText(isParticipantBuffering, isHost)}
+                />
+            </MenuItem>
+        );
+    });
+
+    if (groupBuffering && !selfBuffering) {
+        items.push(
+            <MenuItem
+                key='sync-play-group-buffering'
+                disabled
+            >
+                <ListItemIcon>
+                    <CircularProgress size={20} />
+                </ListItemIcon>
+                <ListItemText primary={globalize.translate('MessageSyncPlayGroupWaitOthers')} />
+            </MenuItem>
+        );
+    }
+
+    items.push(<Divider key='sync-play-participants-divider' />);
+
+    return items;
+}
+
+interface ActiveGroupMenuOptions {
+    participants: string[] | undefined
+    hostUsername: string | null
+    localUsername: string | null | undefined
+    selfBuffering: boolean
+    groupBuffering: boolean
+    canResumePlayback: boolean
+    canHaltPlayback: boolean
+    onStartGroupPlaybackClick: () => void
+    onStopGroupPlaybackClick: () => void
+    onGroupSettingsClick: () => void
+    onCopyInviteLinkClick: () => void
+    onGroupLeaveClick: () => void
+}
+
+/**
+ * Builds the menu items shown while the user is part of a SyncPlay group: the
+ * participant list, playback resume/halt controls, and group management actions.
+ */
+function buildActiveGroupMenuItems(options: ActiveGroupMenuOptions) {
+    const items = [];
+
+    if (options.participants?.length) {
+        items.push(...buildParticipantMenuItems(
+            options.participants,
+            options.hostUsername,
+            options.localUsername,
+            options.selfBuffering,
+            options.groupBuffering
+        ));
+    }
+
+    if (options.canResumePlayback) {
+        items.push(
+            <MenuItem
+                key='sync-play-start-playback'
+                onClick={options.onStartGroupPlaybackClick}
+            >
+                <ListItemIcon>
+                    <PlayCircle />
+                </ListItemIcon>
+                <ListItemText primary={globalize.translate('LabelSyncPlayResumePlayback')} />
+            </MenuItem>
+        );
+    } else if (options.canHaltPlayback) {
+        items.push(
+            <MenuItem
+                key='sync-play-stop-playback'
+                onClick={options.onStopGroupPlaybackClick}
+            >
+                <ListItemIcon>
+                    <StopCircle />
+                </ListItemIcon>
+                <ListItemText primary={globalize.translate('LabelSyncPlayHaltPlayback')} />
+            </MenuItem>
+        );
+    }
+
+    items.push(
+        <MenuItem
+            key='sync-play-settings'
+            onClick={options.onGroupSettingsClick}
+        >
+            <ListItemIcon>
+                <Tune />
+            </ListItemIcon>
+            <ListItemText
+                primary={globalize.translate('Settings')}
+            />
+        </MenuItem>
+    );
+
+    items.push(
+        <MenuItem
+            key='sync-play-copy-invite-link'
+            onClick={options.onCopyInviteLinkClick}
+        >
+            <ListItemIcon>
+                <ContentCopy />
+            </ListItemIcon>
+            <ListItemText
+                primary={globalize.translate('LabelSyncPlayCopyInviteLink')}
+            />
+        </MenuItem>
+    );
+
+    items.push(<Divider key='sync-play-controls-divider' />);
+
+    items.push(
+        <MenuItem
+            key='sync-play-exit'
+            onClick={options.onGroupLeaveClick}
+        >
+            <ListItemIcon>
+                <PersonRemove />
+            </ListItemIcon>
+            <ListItemText
+                primary={globalize.translate('LabelSyncPlayLeaveGroup')}
+            />
+        </MenuItem>
+    );
+
+    return items;
 }
 
 const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
@@ -54,6 +285,7 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
     const { __legacyApiClient__, api, user } = useApi();
     const [ currentGroup, setCurrentGroup ] = useState<GroupInfoDto>();
     const isSyncPlayEnabled = Boolean(currentGroup);
+    const { selfBuffering, groupBuffering } = useSyncPlayBufferingState(syncPlay, isSyncPlayEnabled, user?.Name);
 
     useEffect(() => {
         setSyncPlay(pluginManager.firstOfType(PluginType.SyncPlay)?.instance);
@@ -158,11 +390,7 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
     }, [ onMenuClose, syncPlay, user ]);
 
     const updateSyncPlayGroup = useCallback((_e: Event, enabled: boolean) => {
-        if (syncPlay && enabled) {
-            setCurrentGroup(syncPlay.Manager.getGroupInfo() ?? undefined);
-        } else {
-            setCurrentGroup(undefined);
-        }
+        setCurrentGroup(enabled ? (syncPlay?.Manager.getGroupInfo() ?? undefined) : undefined);
     }, [ syncPlay ]);
 
     useEffect(() => {
@@ -177,77 +405,20 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
 
     const menuItems = [];
     if (isSyncPlayEnabled) {
-        if (!syncPlay?.Manager.isPlaylistEmpty() && !syncPlay?.Manager.isPlaybackActive()) {
-            menuItems.push(
-                <MenuItem
-                    key='sync-play-start-playback'
-                    onClick={onStartGroupPlaybackClick}
-                >
-                    <ListItemIcon>
-                        <PlayCircle />
-                    </ListItemIcon>
-                    <ListItemText primary={globalize.translate('LabelSyncPlayResumePlayback')} />
-                </MenuItem>
-            );
-        } else if (syncPlay?.Manager.isPlaybackActive()) {
-            menuItems.push(
-                <MenuItem
-                    key='sync-play-stop-playback'
-                    onClick={onStopGroupPlaybackClick}
-                >
-                    <ListItemIcon>
-                        <StopCircle />
-                    </ListItemIcon>
-                    <ListItemText primary={globalize.translate('LabelSyncPlayHaltPlayback')} />
-                </MenuItem>
-            );
-        }
-
-        menuItems.push(
-            <MenuItem
-                key='sync-play-settings'
-                onClick={onGroupSettingsClick}
-            >
-                <ListItemIcon>
-                    <Tune />
-                </ListItemIcon>
-                <ListItemText
-                    primary={globalize.translate('Settings')}
-                />
-            </MenuItem>
-        );
-
-        menuItems.push(
-            <MenuItem
-                key='sync-play-copy-invite-link'
-                onClick={onCopyInviteLinkClick}
-            >
-                <ListItemIcon>
-                    <ContentCopy />
-                </ListItemIcon>
-                <ListItemText
-                    primary={globalize.translate('LabelSyncPlayCopyInviteLink')}
-                />
-            </MenuItem>
-        );
-
-        menuItems.push(
-            <Divider key='sync-play-controls-divider' />
-        );
-
-        menuItems.push(
-            <MenuItem
-                key='sync-play-exit'
-                onClick={onGroupLeaveClick}
-            >
-                <ListItemIcon>
-                    <PersonRemove />
-                </ListItemIcon>
-                <ListItemText
-                    primary={globalize.translate('LabelSyncPlayLeaveGroup')}
-                />
-            </MenuItem>
-        );
+        menuItems.push(...buildActiveGroupMenuItems({
+            participants: currentGroup?.Participants,
+            hostUsername: syncPlay?.Manager.getHostUsername() ?? null,
+            localUsername: user?.Name,
+            selfBuffering,
+            groupBuffering,
+            canResumePlayback: !syncPlay?.Manager.isPlaylistEmpty() && !syncPlay?.Manager.isPlaybackActive(),
+            canHaltPlayback: Boolean(syncPlay?.Manager.isPlaybackActive()),
+            onStartGroupPlaybackClick,
+            onStopGroupPlaybackClick,
+            onGroupSettingsClick,
+            onCopyInviteLinkClick,
+            onGroupLeaveClick
+        }));
     } else if (!groups?.length && user?.Policy?.SyncPlayAccess !== SyncPlayUserAccessType.CreateAndJoinGroups) {
         menuItems.push(
             <MenuItem key='sync-play-unavailable' disabled>

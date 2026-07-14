@@ -4,6 +4,7 @@
  */
 
 import * as Helper from './Helper';
+import { getLastGroup, setLastGroup, clearLastGroup } from './Settings';
 import TimeSyncCore from './timeSync/TimeSyncCore';
 import PlaybackCore from './PlaybackCore';
 import QueueCore from './QueueCore';
@@ -38,6 +39,16 @@ class Manager {
         this.followingGroupPlayback = true; // Follow or ignore group playback.
         this.lastPlaybackCommand = null; // Last received playback command from server, tracks state of group.
 
+        this.groupPlaybackState = null; // Latest known group playback state (Idle/Waiting/Paused/Playing).
+        this.groupPlaybackStateReason = null; // Reason for the latest group playback state.
+
+        this.localUsername = null; // Best-effort username of the local user, used for the host-lock convention.
+
+        // Lightweight client-side convention: the group's host is whoever created it (the
+        // earliest joiner). It is used only to gate the playPause/seek convenience buttons,
+        // it is NOT enforced server-side.
+        this.hostLockEnabled = true;
+
         this.currentPlayer = null;
         this.playerWrapper = null;
     }
@@ -67,6 +78,13 @@ class Manager {
                 });
             }
         });
+
+        // Attempt to silently rejoin the last SyncPlay group whenever the WebSocket
+        // (re)connects, e.g. on app boot, after a page reload, or when a mobile app
+        // resumes from the background and reopens its connection.
+        Events.on(apiClient, 'websocketopen', () => {
+            this.restoreLastGroup(apiClient);
+        });
     }
 
     /**
@@ -79,6 +97,47 @@ class Manager {
         }
 
         this.apiClient = apiClient;
+        this.localUsername = null;
+
+        // Best-effort resolution of the local username, used by the host-lock convention.
+        if (apiClient.getCurrentUserId()) {
+            apiClient.getCurrentUser().then((user) => {
+                this.localUsername = user?.Name ?? null;
+            }).catch((error) => {
+                console.error('SyncPlay updateApiClient: failed to resolve current username.', error);
+            });
+        }
+    }
+
+    /**
+     * Attempts to silently rejoin the last SyncPlay group the user was part of, provided
+     * the ApiClient belongs to the same server and the group still exists.
+     * @param {Object} apiClient The ApiClient.
+     */
+    restoreLastGroup(apiClient) {
+        if (this.isSyncPlayEnabled()) {
+            return;
+        }
+
+        const lastGroup = getLastGroup();
+        if (!lastGroup || lastGroup.serverId !== apiClient.serverId()) {
+            return;
+        }
+
+        apiClient.getSyncPlayGroups().then((response) => response.json()).then((groups) => {
+            const groupStillExists = groups.some((group) => group.GroupId === lastGroup.groupId);
+            if (groupStillExists) {
+                console.debug(`SyncPlay restoreLastGroup: rejoining group ${lastGroup.groupId}.`);
+                apiClient.joinSyncPlayGroup({
+                    GroupId: lastGroup.groupId
+                });
+            } else {
+                console.debug(`SyncPlay restoreLastGroup: group ${lastGroup.groupId} no longer exists.`);
+                clearLastGroup();
+            }
+        }).catch((error) => {
+            console.error('SyncPlay restoreLastGroup: failed to look up SyncPlay groups.', error);
+        });
     }
 
     /**
@@ -223,11 +282,15 @@ class Manager {
                 this.groupInfo = cmd.Data;
                 break;
             case 'StateUpdate':
+                this.groupPlaybackState = cmd.Data.State;
+                this.groupPlaybackStateReason = cmd.Data.Reason;
                 Events.trigger(this, 'group-state-update', [cmd.Data.State, cmd.Data.Reason]);
                 console.debug(`SyncPlay processGroupUpdate: state changed to ${cmd.Data.State} because ${cmd.Data.Reason}.`);
                 break;
             case 'GroupDoesNotExist':
                 toast(globalize.translate('MessageSyncPlayGroupDoesNotExist'));
+                // Stop trying to silently rejoin a group that no longer exists.
+                clearLastGroup();
                 break;
             case 'CreateGroupDenied':
                 toast(globalize.translate('MessageSyncPlayCreateGroupDenied'));
@@ -371,6 +434,7 @@ class Manager {
         }
 
         this.groupInfo = groupInfo;
+        setLastGroup(apiClient.serverId(), groupInfo.GroupId);
 
         this.syncPlayEnabledAt = groupInfo.LastUpdatedAt;
         this.playerWrapper.bindToPlayer();
@@ -404,7 +468,10 @@ class Manager {
         this.followingGroupPlayback = true;
         this.lastPlaybackCommand = null;
         this.queuedCommand = null;
+        this.groupPlaybackState = null;
+        this.groupPlaybackStateReason = null;
         this.playbackCore.syncEnabled = false;
+        clearLastGroup();
         Events.trigger(this, 'enabled', [false]);
         this.playerWrapper.unbindFromPlayer();
 
@@ -427,6 +494,75 @@ class Manager {
      */
     getGroupInfo() {
         return this.groupInfo;
+    }
+
+    /**
+     * Gets the best-effort username of the local user.
+     * @returns {string|null} The local username, or null if not resolved yet.
+     */
+    getLocalUsername() {
+        return this.localUsername;
+    }
+
+    /**
+     * Gets the username of the group's host under the client-side host-lock convention.
+     *
+     * GroupInfoDto does not expose a creator/UserId, only an ordered list of participant
+     * usernames. As a lightweight, purely client-side convention we treat the first entry
+     * (the earliest joiner, i.e. whoever created the group) as the "host". If the host
+     * leaves, the next-oldest participant becomes the host automatically.
+     * @returns {string|null} The host's username, or null if not in a group.
+     */
+    getHostUsername() {
+        return this.groupInfo?.Participants?.[0] ?? null;
+    }
+
+    /**
+     * Whether the local user is the group's host.
+     * @returns {boolean} _true_ if the local user is the host, _false_ otherwise.
+     */
+    isSessionHost() {
+        const host = this.getHostUsername();
+        return !host || !this.localUsername || host === this.localUsername;
+    }
+
+    /**
+     * Checks whether the local user is allowed to control group playback (play/pause/seek)
+     * under the host-lock convention. Fails open (allows control) when SyncPlay is disabled,
+     * the lock is turned off, or the host/local identity is not known yet, so a transient
+     * lookup delay can never strand every participant with a frozen player.
+     * @returns {boolean} _true_ if playback control is allowed, _false_ otherwise.
+     */
+    isPlaybackControlAllowed() {
+        if (!this.isSyncPlayEnabled() || !this.hostLockEnabled) {
+            return true;
+        }
+
+        return this.isSessionHost();
+    }
+
+    /**
+     * Shows a toast informing the local user that only the host may control playback.
+     */
+    notifyPlaybackControlDenied() {
+        const host = this.getHostUsername();
+        toast(globalize.translate('MessageSyncPlayHostControlsPlayback', host ?? ''));
+    }
+
+    /**
+     * Whether the group is currently waiting on a participant to finish buffering.
+     * @returns {boolean} _true_ if the group is waiting on buffering, _false_ otherwise.
+     */
+    isGroupBuffering() {
+        return this.groupPlaybackState === 'Waiting' && this.groupPlaybackStateReason === 'Buffer';
+    }
+
+    /**
+     * Whether the local client's player is currently buffering.
+     * @returns {boolean} _true_ if this client is buffering, _false_ otherwise.
+     */
+    isLocalClientBuffering() {
+        return this.playbackCore.isBuffering();
     }
 
     /**
