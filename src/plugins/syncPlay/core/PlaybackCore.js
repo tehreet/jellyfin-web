@@ -66,7 +66,7 @@ class PlaybackCore {
         this.useSkipToSync = toBoolean(getSetting('useSkipToSync'), true);
 
         // Whether sync correction during playback is active.
-        this.enableSyncCorrection = toBoolean(getSetting('enableSyncCorrection'), false);
+        this.enableSyncCorrection = toBoolean(getSetting('enableSyncCorrection'), true);
     }
 
     /**
