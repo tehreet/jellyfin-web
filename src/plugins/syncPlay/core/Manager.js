@@ -507,14 +507,15 @@ class Manager {
     /**
      * Gets the username of the group's host under the client-side host-lock convention.
      *
-     * GroupInfoDto does not expose a creator/UserId, only an ordered list of participant
-     * usernames. As a lightweight, purely client-side convention we treat the first entry
-     * (the earliest joiner, i.e. whoever created the group) as the "host". If the host
-     * leaves, the next-oldest participant becomes the host automatically.
+     * Backed by the server-provided GroupInfoDto.HostUsername field: the username of the
+     * session that created the group, set once at creation time and never reassigned
+     * afterward regardless of participant churn. (Previously this fell back to guessing
+     * from Participants[0], the earliest-joined participant, which is unreliable since that
+     * array's order/membership can change as people join and leave.)
      * @returns {string|null} The host's username, or null if not in a group.
      */
     getHostUsername() {
-        return this.groupInfo?.Participants?.[0] ?? null;
+        return this.groupInfo?.HostUsername ?? null;
     }
 
     /**

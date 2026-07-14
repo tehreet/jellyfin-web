@@ -1,4 +1,3 @@
-import type { GroupInfoDto } from '@jellyfin/sdk/lib/generated-client/models/group-info-dto';
 import { SyncPlayUserAccessType } from '@jellyfin/sdk/lib/generated-client/models/sync-play-user-access-type';
 import { getSyncPlayApi } from '@jellyfin/sdk/lib/utils/api/sync-play-api';
 import ContentCopy from '@mui/icons-material/ContentCopy';
@@ -27,6 +26,7 @@ import { useSyncPlayGroups } from 'hooks/useSyncPlayGroups';
 import globalize from 'lib/globalize';
 import { getSyncPlayInviteLink } from 'plugins/syncPlay/core/inviteLink';
 import { copy } from 'scripts/clipboard';
+import type { GroupInfoDto } from 'types/base/models/group-info-dto';
 import { PluginType } from 'types/plugin';
 import Events, { Event } from 'utils/events';
 
