@@ -1,4 +1,3 @@
-import { getSyncPlayApi } from '@jellyfin/sdk/lib/utils/api/sync-play-api';
 import React, { type FC, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -8,16 +7,13 @@ import toast from 'components/toast/toast';
 import { useApi } from 'hooks/useApi';
 import globalize from 'lib/globalize';
 import { PluginType } from 'types/plugin';
-import Events, { type Event } from 'utils/events';
 
-// Safety-net delay: normally the redirect happens as soon as the `enabled`
-// Manager event fires (confirming the `GroupJoined` websocket round-trip).
-// This just covers the case where that event was missed or already fired
-// before this component mounted.
-const REDIRECT_FALLBACK_DELAY = 1500;
+interface SyncPlayManagerLike {
+    joinGroupExplicit: (groupId: string) => Promise<void>
+}
 
 interface SyncPlayInstance {
-    Manager: object
+    Manager: SyncPlayManagerLike
 }
 
 /**
@@ -35,6 +31,8 @@ const SyncPlayJoinPage: FC = () => {
     const itemId = searchParams.get('itemId') ?? undefined;
 
     useEffect(() => {
+        let isCancelled = false;
+
         const redirectToLanding = () => {
             if (hasRedirected.current) return;
             hasRedirected.current = true;
@@ -48,39 +46,31 @@ const SyncPlayJoinPage: FC = () => {
         }
 
         const syncPlay: SyncPlayInstance | undefined = pluginManager.firstOfType(PluginType.SyncPlay)?.instance;
-        let fallbackTimeout: ReturnType<typeof setTimeout> | undefined;
-
-        const onEnabled = (_e: Event, enabled: boolean) => {
-            if (enabled) redirectToLanding();
-        };
-
-        if (syncPlay) {
-            Events.on(syncPlay.Manager, 'enabled', onEnabled);
+        if (!syncPlay) {
+            console.error('[SyncPlayJoin] SyncPlay plugin not available, redirecting');
+            redirectToLanding();
+            return;
         }
 
-        getSyncPlayApi(api)
-            .syncPlayJoinGroup({
-                joinGroupRequestDto: {
-                    GroupId: groupId
-                }
-            })
+        // joinGroupExplicit() marks this request as an explicit group change (via
+        // Manager's beginExplicitGroupChange()/endExplicitGroupChange() guard) so the
+        // background restoreLastGroup() rejoin can never race it, and it only resolves once
+        // the joined group's GroupId actually matches the one requested here -- so a stale
+        // rejoin landing around the same time can never be mistaken for success.
+        syncPlay.Manager.joinGroupExplicit(groupId)
             .then(() => {
-                // The server confirms the join asynchronously via a `GroupJoined`
-                // websocket event (handled by `onEnabled` above); this timeout is
-                // just a fallback in case that event is missed.
-                fallbackTimeout = setTimeout(redirectToLanding, REDIRECT_FALLBACK_DELAY);
+                if (!isCancelled) redirectToLanding();
             })
             .catch(err => {
                 console.error('[SyncPlayJoin] failed to join SyncPlay group', err);
-                toast(globalize.translate('MessageSyncPlayJoinGroupDenied'));
-                redirectToLanding();
+                if (!isCancelled) {
+                    toast(globalize.translate('MessageSyncPlayJoinGroupDenied'));
+                    redirectToLanding();
+                }
             });
 
         return () => {
-            if (syncPlay) {
-                Events.off(syncPlay.Manager, 'enabled', onEnabled);
-            }
-            if (fallbackTimeout) clearTimeout(fallbackTimeout);
+            isCancelled = true;
         };
     }, [ api, groupId, itemId, navigate ]);
 

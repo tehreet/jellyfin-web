@@ -44,10 +44,17 @@ class Manager {
 
         this.localUsername = null; // Best-effort username of the local user, used for the host-lock convention.
 
-        // Lightweight client-side convention: the group's host is whoever created it (the
-        // earliest joiner). It is used only to gate the playPause/seek convenience buttons,
-        // it is NOT enforced server-side.
+        // The group's host is the session that created it, per the server-provided
+        // GroupInfoDto.HostUsername field (set once at creation, never reassigned). It is
+        // used only to gate the playPause/seek convenience buttons client-side; playback
+        // control itself is NOT enforced server-side.
         this.hostLockEnabled = true;
+
+        // Set while an explicit join/create request (from the magic-link Join page or the
+        // "copy invite link" flow) is in flight, so the background restoreLastGroup() logic
+        // (below) can detect it and defer instead of racing it. See joinGroupExplicit(),
+        // beginExplicitGroupChange() and endExplicitGroupChange().
+        this.explicitGroupChangeInFlight = false;
 
         this.currentPlayer = null;
         this.playerWrapper = null;
@@ -112,10 +119,18 @@ class Manager {
     /**
      * Attempts to silently rejoin the last SyncPlay group the user was part of, provided
      * the ApiClient belongs to the same server and the group still exists.
+     *
+     * This defers entirely to any explicit join/create currently in flight (see
+     * beginExplicitGroupChange()/endExplicitGroupChange()) -- e.g. the magic-link Join page
+     * or the "copy invite link" flow -- since those already cover "user is (re)connecting"
+     * and must win any race against this silent background rejoin. The guard is checked
+     * both up front and again right before actually issuing the rejoin request, since this
+     * method's extra getSyncPlayGroups() round trip means an explicit request that started
+     * later can easily finish first.
      * @param {Object} apiClient The ApiClient.
      */
     restoreLastGroup(apiClient) {
-        if (this.isSyncPlayEnabled()) {
+        if (this.isSyncPlayEnabled() || this.hasExplicitGroupChangeInFlight()) {
             return;
         }
 
@@ -125,6 +140,11 @@ class Manager {
         }
 
         apiClient.getSyncPlayGroups().then((response) => response.json()).then((groups) => {
+            if (this.isSyncPlayEnabled() || this.hasExplicitGroupChangeInFlight()) {
+                console.debug('SyncPlay restoreLastGroup: an explicit join/create is now in flight, skipping silent rejoin.');
+                return;
+            }
+
             const groupStillExists = groups.some((group) => group.GroupId === lastGroup.groupId);
             if (groupStillExists) {
                 console.debug(`SyncPlay restoreLastGroup: rejoining group ${lastGroup.groupId}.`);
@@ -137,6 +157,94 @@ class Manager {
             }
         }).catch((error) => {
             console.error('SyncPlay restoreLastGroup: failed to look up SyncPlay groups.', error);
+        });
+    }
+
+    /**
+     * Marks an explicit join/create request (originating from the magic-link Join page or
+     * the "copy invite link" flow) as in flight, so restoreLastGroup() defers to it instead
+     * of racing it. Must be paired with a matching endExplicitGroupChange() call once the
+     * request settles (success, failure, mismatch, or timeout).
+     */
+    beginExplicitGroupChange() {
+        this.explicitGroupChangeInFlight = true;
+    }
+
+    /**
+     * Clears the explicit join/create in-flight marker set by beginExplicitGroupChange().
+     */
+    endExplicitGroupChange() {
+        this.explicitGroupChangeInFlight = false;
+    }
+
+    /**
+     * Whether an explicit join/create request is currently in flight.
+     * @returns {boolean} _true_ if an explicit join/create is in flight, _false_ otherwise.
+     */
+    hasExplicitGroupChangeInFlight() {
+        return this.explicitGroupChangeInFlight;
+    }
+
+    /**
+     * Explicitly joins a SyncPlay group (as opposed to the background restoreLastGroup()
+     * rejoin), coordinating with it via beginExplicitGroupChange()/endExplicitGroupChange()
+     * so the two can never race each other, and verifying that the group actually joined
+     * matches the one requested before resolving.
+     * @param {string} groupId The GroupId to join.
+     * @returns {Promise} A Promise that resolves once `groupId` has actually been joined, or
+     * rejects if a different group was joined instead, the request failed, or it timed out.
+     */
+    joinGroupExplicit(groupId) {
+        // Already in the requested group (e.g. the user opened their own invite link):
+        // nothing to do, and no new 'GroupJoined'/'enabled' event will fire to wait on.
+        if (this.isSyncPlayEnabled() && this.getGroupInfo()?.GroupId === groupId) {
+            return Promise.resolve();
+        }
+
+        const apiClient = this.getApiClient();
+
+        this.beginExplicitGroupChange();
+
+        const waitForMatchingGroup = Helper.waitForEventOnce(this, 'enabled', Helper.WaitForEventDefaultTimeout)
+            .then(() => {
+                const joinedGroupId = this.getGroupInfo()?.GroupId;
+                if (joinedGroupId !== groupId) {
+                    throw new Error(`SyncPlay joinGroupExplicit: joined group ${joinedGroupId} does not match requested group ${groupId}.`);
+                }
+            });
+
+        return apiClient.joinSyncPlayGroup({
+            GroupId: groupId
+        }).then(() => waitForMatchingGroup).finally(() => {
+            this.endExplicitGroupChange();
+        });
+    }
+
+    /**
+     * Explicitly creates a new SyncPlay group (as opposed to joining an existing one),
+     * coordinating with the background restoreLastGroup() rejoin via
+     * beginExplicitGroupChange()/endExplicitGroupChange() so a stale rejoin can never be
+     * mistaken for the newly-created group's 'enabled' event.
+     * @param {string} groupName The name to give the new group.
+     * @returns {Promise<string>} A Promise that resolves with the new group's GroupId.
+     */
+    createGroupExplicit(groupName) {
+        const apiClient = this.getApiClient();
+
+        this.beginExplicitGroupChange();
+
+        const waitForEnabled = Helper.waitForEventOnce(this, 'enabled', Helper.WaitForEventDefaultTimeout);
+
+        return apiClient.createSyncPlayGroup({
+            GroupName: groupName
+        }).then(() => waitForEnabled).then(() => {
+            const groupId = this.getGroupInfo()?.GroupId;
+            if (!groupId) {
+                throw new Error('SyncPlay createGroupExplicit: group was not created.');
+            }
+            return groupId;
+        }).finally(() => {
+            this.endExplicitGroupChange();
         });
     }
 

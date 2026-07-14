@@ -3,7 +3,6 @@
  * @module components/syncPlay/core/inviteLink
  */
 
-import * as Helper from './Helper';
 import { appRouter } from '../../../components/router/appRouter';
 import { playbackManager } from '../../../components/playback/playbackmanager';
 
@@ -44,15 +43,11 @@ export async function getSyncPlayInviteLink(syncPlayManager, groupName) {
     const itemId = getCurrentItemId(syncPlayManager);
 
     if (!syncPlayManager.isSyncPlayEnabled()) {
-        const apiClient = syncPlayManager.getApiClient();
-
-        apiClient.createSyncPlayGroup({
-            GroupName: groupName
-        });
-
-        // Wait for the server to confirm the group was joined (`GroupJoined` ->
-        // `enableSyncPlay()` -> `enabled` event) before we know the GroupId.
-        await Helper.waitForEventOnce(syncPlayManager, 'enabled', Helper.WaitForEventDefaultTimeout);
+        // createGroupExplicit() marks this request as an explicit group change (via
+        // Manager's beginExplicitGroupChange()/endExplicitGroupChange() guard) so the
+        // background restoreLastGroup() rejoin can never be mistaken for -- or race -- the
+        // `enabled` event confirming this newly-created group.
+        await syncPlayManager.createGroupExplicit(groupName);
 
         if (itemId) {
             // Queues the item into the fresh group without unpausing.
