@@ -4,6 +4,8 @@ import toast from '../../../components/toast/toast';
 import actionsheet from '../../../components/actionSheet/actionSheet';
 import globalize from '../../../lib/globalize';
 import playbackPermissionManager from './playbackPermissionManager';
+import { getSyncPlayInviteLink } from '../core/inviteLink';
+import { copy } from '../../../scripts/clipboard';
 import { pluginManager } from '../../../components/pluginManager';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { PluginType } from '../../../types/plugin.ts';
@@ -149,6 +151,14 @@ class GroupSelectionMenu {
         });
 
         menuItems.push({
+            name: globalize.translate('LabelSyncPlayCopyInviteLink'),
+            icon: 'content_copy',
+            id: 'copy-invite-link',
+            selected: false,
+            secondaryText: globalize.translate('LabelSyncPlayCopyInviteLinkDescription')
+        });
+
+        menuItems.push({
             name: globalize.translate('LabelSyncPlayLeaveGroup'),
             icon: 'meeting_room',
             id: 'leave-group',
@@ -172,6 +182,19 @@ class GroupSelectionMenu {
                 this.SyncPlay?.Manager.haltGroupPlayback(apiClient);
             } else if (id == 'leave-group') {
                 apiClient.leaveSyncPlayGroup();
+            } else if (id == 'copy-invite-link') {
+                getSyncPlayInviteLink(
+                    this.SyncPlay?.Manager,
+                    globalize.translate('SyncPlayGroupDefaultTitle', user.localUser.Name)
+                ).then((link) => (
+                    copy(link)
+                )).then(() => {
+                    toast({
+                        text: globalize.translate('MessageSyncPlayInviteLinkCopied')
+                    });
+                }).catch((error) => {
+                    console.error('SyncPlay: failed to copy invite link:', error);
+                });
             } else if (id == 'settings') {
                 new SyncPlaySettingsEditor(apiClient, this.SyncPlay?.Manager.getTimeSyncCore(), { groupInfo: groupInfo })
                     .embed()

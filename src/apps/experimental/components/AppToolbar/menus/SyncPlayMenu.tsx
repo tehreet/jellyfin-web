@@ -1,6 +1,7 @@
 import type { GroupInfoDto } from '@jellyfin/sdk/lib/generated-client/models/group-info-dto';
 import { SyncPlayUserAccessType } from '@jellyfin/sdk/lib/generated-client/models/sync-play-user-access-type';
 import { getSyncPlayApi } from '@jellyfin/sdk/lib/utils/api/sync-play-api';
+import ContentCopy from '@mui/icons-material/ContentCopy';
 import GroupAdd from '@mui/icons-material/GroupAdd';
 import PersonAdd from '@mui/icons-material/PersonAdd';
 import PersonOff from '@mui/icons-material/PersonOff';
@@ -18,9 +19,12 @@ import type { ApiClient } from 'jellyfin-apiclient';
 import React, { FC, useCallback, useEffect, useState } from 'react';
 
 import { pluginManager } from 'components/pluginManager';
+import toast from 'components/toast/toast';
 import { useApi } from 'hooks/useApi';
 import { useSyncPlayGroups } from 'hooks/useSyncPlayGroups';
 import globalize from 'lib/globalize';
+import { getSyncPlayInviteLink } from 'plugins/syncPlay/core/inviteLink';
+import { copy } from 'scripts/clipboard';
 import { PluginType } from 'types/plugin';
 import Events, { Event } from 'utils/events';
 
@@ -136,6 +140,23 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
         }
     }, [ __legacyApiClient__, onMenuClose, syncPlay ]);
 
+    const onCopyInviteLinkClick = useCallback(() => {
+        if (!syncPlay || !user) return;
+
+        getSyncPlayInviteLink(
+            syncPlay.Manager,
+            globalize.translate('SyncPlayGroupDefaultTitle', user.Name)
+        ).then(link => (
+            copy(link)
+        )).then(() => {
+            toast(globalize.translate('MessageSyncPlayInviteLinkCopied'));
+        }).catch(err => {
+            console.error('[SyncPlayMenu] failed to copy SyncPlay invite link', err);
+        });
+
+        onMenuClose();
+    }, [ onMenuClose, syncPlay, user ]);
+
     const updateSyncPlayGroup = useCallback((_e: Event, enabled: boolean) => {
         if (syncPlay && enabled) {
             setCurrentGroup(syncPlay.Manager.getGroupInfo() ?? undefined);
@@ -192,6 +213,20 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
                 </ListItemIcon>
                 <ListItemText
                     primary={globalize.translate('Settings')}
+                />
+            </MenuItem>
+        );
+
+        menuItems.push(
+            <MenuItem
+                key='sync-play-copy-invite-link'
+                onClick={onCopyInviteLinkClick}
+            >
+                <ListItemIcon>
+                    <ContentCopy />
+                </ListItemIcon>
+                <ListItemText
+                    primary={globalize.translate('LabelSyncPlayCopyInviteLink')}
                 />
             </MenuItem>
         );

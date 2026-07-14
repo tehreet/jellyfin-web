@@ -11,6 +11,7 @@ export const ASYNC_USER_ROUTES: AsyncRoute[] = [
     { path: 'mypreferencesmenu', page: 'user/settings' },
     { path: 'quickconnect', page: 'quickConnect' },
     { path: 'search' },
+    { path: 'syncplay/join', page: 'syncplay/Join', type: AppType.Experimental },
     { path: 'tv', page: 'shows', type: AppType.Experimental },
     { path: 'userprofile', page: 'user/userprofile' }
 ];
