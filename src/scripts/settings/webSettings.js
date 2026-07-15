@@ -94,6 +94,15 @@ export function getThemes() {
 
 export const getDefaultTheme = () => internalDefaultTheme;
 
+export function getSyncPlayDiscordWebhookUrl() {
+    return getConfig().then(config => {
+        return config.syncPlayDiscordWebhookUrl || '';
+    }).catch(error => {
+        console.log('cannot get web config:', error);
+        return '';
+    });
+}
+
 export function getMenuLinks() {
     return getConfig().then(config => {
         if (!config.menuLinks) {

@@ -5,6 +5,7 @@
 
 import { playbackManager } from '../../../components/playback/playbackmanager';
 import { copy } from '../../../scripts/clipboard';
+import { announceWatchParty } from './discordNotify';
 
 /**
  * Gets the id of the item the host is currently watching/queued, if any.
@@ -90,11 +91,17 @@ export async function getSyncPlayInviteLink(syncPlayManager, groupName) {
  * second trip through the menu's "Copy invite link" entry. Delegates to
  * getSyncPlayInviteLink(), which (given no group is joined yet) creates the group and
  * queues whatever the host currently has playing WITHOUT unpausing.
+ *
+ * Also announces the new party to the configured Discord channel (see
+ * discordNotify.js) -- fire-and-forget, so the clipboard is never held up
+ * and a Discord hiccup can't break group creation.
  * @param {Manager} syncPlayManager The SyncPlay manager.
  * @param {string} groupName The name for the new group.
  * @returns {Promise<void>} Resolves once the group exists and the link is on the clipboard.
  */
 export async function createGroupWithInviteLinkOnClipboard(syncPlayManager, groupName) {
+    const itemId = getCurrentItemId(syncPlayManager);
     const link = await getSyncPlayInviteLink(syncPlayManager, groupName);
     await copy(link);
+    announceWatchParty(syncPlayManager, itemId, link);
 }
