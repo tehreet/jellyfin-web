@@ -170,6 +170,39 @@ class PlaybackCore {
     }
 
     /**
+     * Called after (re)joining a group to proactively confirm readiness when the local
+     * player is already attached and not buffering, instead of relying exclusively on a
+     * DOM buffering->ready event cycle (onBuffering()/onReady() above) that may never fire.
+     *
+     * The server unconditionally flags every (re)joining session as buffering and moves the
+     * whole group to Waiting (see WaitingGroupState.SessionJoined() server-side), expecting
+     * that session to eventually send a Ready confirmation via sendBufferingRequest(false).
+     * A session whose video is already playing smoothly at the moment it (re)joins - e.g. a
+     * WebSocket reconnect silently rejoining an already-playing host through
+     * Manager.restoreLastGroup() - will never get a 'waiting'->'playing' DOM transition to
+     * trigger that confirmation, since none of its playback state is actually changing. Left
+     * unhandled, that permanently strands the whole group in Waiting on a phantom buffering
+     * participant. Only confirms readiness when the local state genuinely already indicates
+     * it: if the player is not attached yet, or is already flagged as buffering (a real
+     * 'waiting' DOM event fired and 'playing' hasn't yet), this intentionally does nothing
+     * and leaves onReady() to send the confirmation once it actually happens.
+     */
+    confirmReadyIfAlreadyPlaying() {
+        if (!this.manager.isPlaybackActive()) {
+            // No player attached/loaded locally yet; nothing to confirm.
+            return;
+        }
+
+        if (this.isBuffering()) {
+            // Genuinely (still) buffering per the last DOM event; let onReady() handle it.
+            return;
+        }
+
+        console.debug('SyncPlay confirmReadyIfAlreadyPlaying: player is already ready, proactively confirming.');
+        this.sendBufferingRequest(false);
+    }
+
+    /**
      * Applies a command and checks the playback state if a duplicate command is received.
      * @param {Object} command The playback command.
      */

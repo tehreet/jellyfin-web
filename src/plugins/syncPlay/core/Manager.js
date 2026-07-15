@@ -532,6 +532,18 @@ class Manager {
         if (this.isSyncPlayEnabled()) {
             if (groupInfo.GroupId === this.groupInfo.GroupId) {
                 console.debug(`SyncPlay enableSyncPlay: group ${this.groupInfo.GroupId} already joined.`);
+
+                // This is precisely what a background restoreLastGroup() rejoin (e.g. after a
+                // WebSocket reconnect) hits when the session was already enabled for this exact
+                // group: the server still unconditionally re-runs its SessionJoined handling
+                // (flagging this session as buffering and moving the group to Waiting) even
+                // though nothing actually changed here, and the resulting PlayQueue update is
+                // typically stale/dropped client-side too (see QueueCore.updatePlayQueue()'s
+                // LastUpdate guard) since the queue itself never changed. Without confirming
+                // readiness here, an already-playing host would be stuck forever as a phantom
+                // "buffering" participant with no DOM event or queue update left to clear it.
+                // See PlaybackCore.confirmReadyIfAlreadyPlaying() for the full explanation.
+                this.playbackCore.confirmReadyIfAlreadyPlaying();
                 return;
             } else {
                 console.warn(`SyncPlay enableSyncPlay: switching from group ${this.groupInfo.GroupId} to group ${groupInfo.GroupId}.`);
@@ -546,6 +558,14 @@ class Manager {
 
         this.syncPlayEnabledAt = groupInfo.LastUpdatedAt;
         this.playerWrapper.bindToPlayer();
+
+        // Covers an explicit join/create (joinGroupExplicit()/createGroupExplicit()) or a
+        // restoreLastGroup() rejoin into a group not already known client-side (the group-switch
+        // branch above, or a genuinely fresh join). Now that groupInfo/playerWrapper reflect the
+        // newly-joined group, confirm readiness if the local player already happens to be ready
+        // (e.g. it's still attached and not buffering from a prior group). See
+        // PlaybackCore.confirmReadyIfAlreadyPlaying() for details.
+        this.playbackCore.confirmReadyIfAlreadyPlaying();
 
         Events.trigger(this, 'enabled', [true]);
 
