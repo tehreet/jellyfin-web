@@ -52,5 +52,5 @@
         "chromecastPlayer/plugin",
         "syncPlay/plugin"
     ],
-    "syncPlayDiscordWebhookUrl": ""
+    "syncPlayAnnounceUrl": ""
 }
