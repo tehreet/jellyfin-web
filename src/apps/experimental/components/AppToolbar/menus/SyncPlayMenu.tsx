@@ -24,7 +24,7 @@ import toast from 'components/toast/toast';
 import { useApi } from 'hooks/useApi';
 import { useSyncPlayGroups } from 'hooks/useSyncPlayGroups';
 import globalize from 'lib/globalize';
-import { getSyncPlayInviteLink } from 'plugins/syncPlay/core/inviteLink';
+import { createGroupWithInviteLinkOnClipboard, getSyncPlayInviteLink } from 'plugins/syncPlay/core/inviteLink';
 import { copy } from 'scripts/clipboard';
 import type { GroupInfoDto } from 'types/base/models/group-info-dto';
 import { PluginType } from 'types/plugin';
@@ -294,20 +294,21 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
     const { data: groups } = useSyncPlayGroups();
 
     const onGroupAddClick = useCallback(() => {
-        if (api && user) {
-            getSyncPlayApi(api)
-                .syncPlayCreateGroup({
-                    newGroupRequestDto: {
-                        GroupName: globalize.translate('SyncPlayGroupDefaultTitle', user.Name)
-                    }
-                })
-                .catch(err => {
-                    console.error('[SyncPlayMenu] failed to create a SyncPlay group', err);
-                });
+        if (syncPlay && user) {
+            // Creating a group also drops its invite link straight onto the clipboard --
+            // the whole point of a fresh group is handing someone the link.
+            createGroupWithInviteLinkOnClipboard(
+                syncPlay.Manager,
+                globalize.translate('SyncPlayGroupDefaultTitle', user.Name)
+            ).then(() => {
+                toast(globalize.translate('MessageSyncPlayInviteLinkCopied'));
+            }).catch(err => {
+                console.error('[SyncPlayMenu] failed to create a SyncPlay group', err);
+            });
 
             onMenuClose();
         }
-    }, [ api, onMenuClose, user ]);
+    }, [ onMenuClose, syncPlay, user ]);
 
     const onGroupLeaveClick = useCallback(() => {
         if (api) {

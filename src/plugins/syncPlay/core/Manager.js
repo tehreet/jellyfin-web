@@ -45,10 +45,11 @@ class Manager {
         this.localUsername = null; // Best-effort username of the local user, used for the host-lock convention.
 
         // The group's host is the session that created it, per the server-provided
-        // GroupInfoDto.HostUsername field (set once at creation, never reassigned). It is
-        // used only to gate the playPause/seek convenience buttons client-side; playback
-        // control itself is NOT enforced server-side.
-        this.hostLockEnabled = true;
+        // GroupInfoDto.HostUsername field (set once at creation, never reassigned). With
+        // the lock disabled it is display-only (participant list). The lock proved harmful
+        // in practice: HostUsername is never reassigned when the host leaves, so a group
+        // that outlives its creator becomes permanently uncontrollable for everyone in it.
+        this.hostLockEnabled = false;
 
         // Set while an explicit join/create request (from the magic-link Join page or the
         // "copy invite link" flow) is in flight, so the background restoreLastGroup() logic

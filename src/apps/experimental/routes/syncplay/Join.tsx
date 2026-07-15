@@ -116,6 +116,16 @@ const SyncPlayJoinPage: FC = () => {
                     hasRedirected.current = true;
                 })
                 .catch((err) => {
+                    // QueueCore.startPlayback() navigates to the video OSD as soon as the
+                    // attach begins (so a slow stream start still leaves the user with full
+                    // player chrome). If we're already there, a redirect now would yank a
+                    // merely slow-loading player out from under the user -- stay put and let
+                    // SyncPlay's own stall retry/halt handling deal with the player.
+                    if (window.location.hash.startsWith('#/video')) {
+                        console.warn('[SyncPlayJoin] player attach still pending, already on the video OSD; not redirecting', err);
+                        hasRedirected.current = true;
+                        return;
+                    }
                     console.error('[SyncPlayJoin] timed out attaching local player to group, landing on details page', err);
                     if (!isCancelled) redirectToLanding();
                 });

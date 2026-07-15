@@ -4,6 +4,7 @@
  */
 
 import { playbackManager } from '../../../components/playback/playbackmanager';
+import { copy } from '../../../scripts/clipboard';
 
 /**
  * Gets the id of the item the host is currently watching/queued, if any.
@@ -79,4 +80,21 @@ export async function getSyncPlayInviteLink(syncPlayManager, groupName) {
     // this codebase already uses for in-app links (see AppRouter#getRouteUrl()).
     const currentUrl = window.location.href.split('#')[0];
     return `${currentUrl}#/syncplay/join?${params.toString()}`;
+}
+
+/**
+ * Creates a new SyncPlay group and puts its invite link on the clipboard in one step.
+ *
+ * This is the "New group" flow: a fresh group is only useful once its link is in a
+ * friend's hands, so the link lands on the clipboard immediately instead of requiring a
+ * second trip through the menu's "Copy invite link" entry. Delegates to
+ * getSyncPlayInviteLink(), which (given no group is joined yet) creates the group and
+ * queues whatever the host currently has playing WITHOUT unpausing.
+ * @param {Manager} syncPlayManager The SyncPlay manager.
+ * @param {string} groupName The name for the new group.
+ * @returns {Promise<void>} Resolves once the group exists and the link is on the clipboard.
+ */
+export async function createGroupWithInviteLinkOnClipboard(syncPlayManager, groupName) {
+    const link = await getSyncPlayInviteLink(syncPlayManager, groupName);
+    await copy(link);
 }

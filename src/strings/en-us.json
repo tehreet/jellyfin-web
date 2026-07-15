@@ -1209,6 +1209,7 @@
     "MessageSyncPlayLibraryAccessDenied": "Access to this content is restricted.",
     "MessageSyncPlayNoGroupsAvailable": "No groups available. Start playing something first.",
     "MessageSyncPlayPlaybackPermissionRequired": "Playback permission required.",
+    "MessageSyncPlayRetryingPlayback": "Playback is taking longer than expected, retrying…",
     "MessageSyncPlayUserJoined": "{0} has joined the group.",
     "MessageSyncPlayUserLeft": "{0} has left the group.",
     "MessageTheFollowingLocationWillBeRemovedFromLibrary": "The following media locations will be removed from your library",
