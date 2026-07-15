@@ -3,7 +3,6 @@
  * @module components/syncPlay/core/inviteLink
  */
 
-import { appRouter } from '../../../components/router/appRouter';
 import { playbackManager } from '../../../components/playback/playbackmanager';
 
 /**
@@ -66,5 +65,18 @@ export async function getSyncPlayInviteLink(syncPlayManager, groupName) {
         params.set('itemId', itemId);
     }
 
-    return `${window.location.origin}${appRouter.baseUrl()}/syncplay/join?${params.toString()}`;
+    // The app's router is hash-based (see `createHashRouter` in RootAppRouter.tsx): every
+    // client route -- this one included -- is served from a SINGLE static index.html, and
+    // everything after `#` is handled entirely by React Router; browsers never send the
+    // fragment to the server. A plain path like `${origin}/syncplay/join` has no `#`, so a
+    // fresh page load (as opposed to in-app client-side navigation) asks the server for that
+    // exact literal path, which it does not know how to serve, and it 404s before React
+    // Router ever runs.
+    //
+    // To build a link that survives a fresh load, reuse the exact origin+path(+search) of the
+    // document that is *currently* loaded -- guaranteed servable, since it's what's already in
+    // the address bar -- and only swap in a new hash, using the `#/path` shape that the rest of
+    // this codebase already uses for in-app links (see AppRouter#getRouteUrl()).
+    const currentUrl = window.location.href.split('#')[0];
+    return `${currentUrl}#/syncplay/join?${params.toString()}`;
 }
