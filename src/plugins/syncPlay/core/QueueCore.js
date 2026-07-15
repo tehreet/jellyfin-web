@@ -6,6 +6,7 @@
 import globalize from '../../../lib/globalize';
 import toast from '../../../components/toast/toast';
 import * as Helper from './Helper';
+import Events from '../../../utils/events.ts';
 
 /**
  * Class that manages the queue of SyncPlay.
@@ -103,6 +104,13 @@ class QueueCore {
                     console.error('SyncPlay updatePlayQueue: unknown reason for update:', newPlayQueue.Reason);
                     break;
             }
+
+            // Fired once this specific update has been fully applied (playlist/current-item
+            // state above is already up to date), regardless of Reason -- consumed by e.g. the
+            // magic-link Join page, which needs to know when the queue snapshot that follows a
+            // fresh 'GroupJoined' has actually landed before deciding whether it joined an
+            // active group (non-empty queue) or a genuine empty waiting room.
+            Events.trigger(this.manager, 'queue-update', [newPlayQueue]);
         }).catch((error) => {
             console.warn('SyncPlay updatePlayQueue:', error);
         });
@@ -281,6 +289,20 @@ class QueueCore {
         } else {
             return null;
         }
+    }
+
+    /**
+     * Gets the item id (the underlying media item, as opposed to the playlist entry id
+     * returned by getCurrentPlaylistItemId()) of the currently playing/queued item.
+     * @returns {string|null} The item id, or null if nothing is queued.
+     */
+    getCurrentItemId() {
+        if (!this.lastPlayQueueUpdate) {
+            return null;
+        }
+
+        const index = this.lastPlayQueueUpdate.PlayingItemIndex;
+        return index === -1 ? null : (this.playlist[index]?.Id ?? null);
     }
 
     /**

@@ -256,8 +256,35 @@ class NoActivePlayer extends SyncPlay.Players.GenericPlayer {
 
     /**
      * Overrides PlaybackManager's play method.
+     *
+     * A play request for the exact item the group already has queued/playing is an
+     * "attach my local player to what the group is already doing" request -- e.g. a guest
+     * landing on the item's details page after joining an active group and pressing Play,
+     * or simply reopening the details page while already synced. That must never be
+     * blocked by the host-lock (it doesn't change what the group plays, so it isn't really
+     * a "control" action) and must never fall through to Controller.play(), which issues a
+     * brand new SyncPlaySetNewQueue request that would reset the current position for
+     * every participant, not just the requester.
+     *
+     * A play request for anything else (a genuinely different item, or nothing queued yet)
+     * DOES change what the whole group plays, so it is gated the same as playPause/seek.
      */
     playRequest(options) {
+        const requestedItemId = options?.items?.[0]?.Id ?? options?.ids?.[0];
+        const currentItemId = syncPlayManager.getQueueCore().getCurrentItemId();
+
+        if (requestedItemId && currentItemId && requestedItemId === currentItemId) {
+            if (!syncPlayManager.isPlaybackActive()) {
+                syncPlayManager.getQueueCore().startPlayback(syncPlayManager.getApiClient());
+            }
+            return Promise.resolve();
+        }
+
+        if (!syncPlayManager.isPlaybackControlAllowed()) {
+            syncPlayManager.notifyPlaybackControlDenied();
+            return;
+        }
+
         const controller = syncPlayManager.getController();
         return controller.play(options);
     }
