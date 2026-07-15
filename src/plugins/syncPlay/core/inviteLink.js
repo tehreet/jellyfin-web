@@ -102,6 +102,8 @@ export async function getSyncPlayInviteLink(syncPlayManager, groupName) {
 export async function createGroupWithInviteLinkOnClipboard(syncPlayManager, groupName) {
     const itemId = getCurrentItemId(syncPlayManager);
     const link = await getSyncPlayInviteLink(syncPlayManager, groupName);
-    await copy(link);
+    // Announce before the clipboard write: copy() can throw (focus loss, missing
+    // user activation, permission denied) and the announcement must not die with it.
     announceWatchParty(syncPlayManager, itemId, link);
+    await copy(link);
 }
