@@ -45,11 +45,16 @@ class Manager {
         this.localUsername = null; // Best-effort username of the local user, used for the host-lock convention.
 
         // The group's host is the session that created it, per the server-provided
-        // GroupInfoDto.HostUsername field (set once at creation, never reassigned). With
-        // the lock disabled it is display-only (participant list). The lock proved harmful
-        // in practice: HostUsername is never reassigned when the host leaves, so a group
-        // that outlives its creator becomes permanently uncontrollable for everyone in it.
+        // GroupInfoDto.HostUsername field (reassigned by the server when the host's last
+        // session leaves, but only pushed to clients through paths that send a full group
+        // info DTO -- see refreshGroupInfo()). With the lock disabled it is display-only
+        // (participant list). The lock proved harmful in practice: a transiently stale
+        // HostUsername would strand every participant with a frozen player.
         this.hostLockEnabled = false;
+
+        // Set while a refreshGroupInfo() request is in flight, so a burst of join/leave
+        // updates results in a single SyncPlay/List round trip instead of one each.
+        this.groupInfoRefreshInFlight = false;
 
         // Set while an explicit join/create request (from the magic-link Join page or the
         // "copy invite link" flow) is in flight, so the background restoreLastGroup() logic
@@ -368,12 +373,16 @@ class Manager {
                 } else {
                     this.groupInfo.Participants.push(cmd.Data);
                 }
+                this.refreshGroupInfo(apiClient);
                 break;
             case 'UserLeft':
                 toast(globalize.translate('MessageSyncPlayUserLeft', cmd.Data));
                 if (this.groupInfo.Participants) {
                     this.groupInfo.Participants = this.groupInfo.Participants.filter((user) => user !== cmd.Data);
                 }
+                // The server may have just reassigned the host to a remaining participant,
+                // but only sends the username of who left -- refetch for the new host.
+                this.refreshGroupInfo(apiClient);
                 break;
             case 'GroupJoined':
                 cmd.Data.LastUpdatedAt = new Date(cmd.Data.LastUpdatedAt);
@@ -414,6 +423,37 @@ class Manager {
                 console.error(`SyncPlay processGroupUpdate: command ${cmd.Type} not recognised.`);
                 break;
         }
+    }
+
+    /**
+     * Refetches the current group's info from the server and replaces the stored copy.
+     *
+     * Join/leave updates only carry the username of who joined/left, but the server also
+     * reassigns GroupInfoDto.HostUsername when the host's last session leaves -- without a
+     * refetch the host shown in the UI goes stale. At most one refresh is in flight at a
+     * time, so a burst of updates costs a single round trip.
+     * @param {Object} apiClient The ApiClient.
+     */
+    refreshGroupInfo(apiClient) {
+        const groupId = this.groupInfo?.GroupId;
+        if (!groupId || this.groupInfoRefreshInFlight) {
+            return;
+        }
+
+        this.groupInfoRefreshInFlight = true;
+        apiClient.getSyncPlayGroups().then((response) => response.json()).then((groups) => {
+            const group = groups.find((candidate) => candidate.GroupId === groupId);
+            // Ignore the response if the group is gone or this client switched groups meanwhile.
+            if (group && this.groupInfo?.GroupId === groupId) {
+                group.LastUpdatedAt = new Date(group.LastUpdatedAt);
+                this.groupInfo = group;
+                Events.trigger(this, 'group-info-update', [group]);
+            }
+        }).catch((error) => {
+            console.error('SyncPlay refreshGroupInfo: failed to refresh group info.', error);
+        }).finally(() => {
+            this.groupInfoRefreshInFlight = false;
+        });
     }
 
     /**
@@ -637,9 +677,10 @@ class Manager {
      * Gets the username of the group's host under the client-side host-lock convention.
      *
      * Backed by the server-provided GroupInfoDto.HostUsername field: the username of the
-     * session that created the group, set once at creation time and never reassigned
-     * afterward regardless of participant churn. (Previously this fell back to guessing
-     * from Participants[0], the earliest-joined participant, which is unreliable since that
+     * session that created the group, reassigned by the server to a remaining participant
+     * when the host's last session leaves (kept fresh via refreshGroupInfo(), since leave
+     * updates alone don't carry it). (Previously this fell back to guessing from
+     * Participants[0], the earliest-joined participant, which is unreliable since that
      * array's order/membership can change as people join and leave.)
      * @returns {string|null} The host's username, or null if not in a group.
      */

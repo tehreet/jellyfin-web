@@ -4,8 +4,8 @@ import type { GroupInfoDto as GeneratedGroupInfoDto } from '@jellyfin/sdk/lib/ge
  * Extends the generated `GroupInfoDto` with `HostUsername`, a field the server has added
  * (SyncPlay group-info DTO) that the generated OpenAPI client does not know about yet.
  *
- * `HostUsername` is the username of the session that created the group. It is set once at
- * group creation and never reassigned afterward, regardless of participant churn -- unlike
+ * `HostUsername` is the username of the session that created the group, reassigned by the
+ * server to a remaining participant when the host's last session leaves -- unlike
  * `Participants[0]`, which is unreliable since that array's order/membership can change as
  * people join and leave.
  *
