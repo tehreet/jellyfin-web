@@ -394,15 +394,23 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
         setCurrentGroup(enabled ? (syncPlay?.Manager.getGroupInfo() ?? undefined) : undefined);
     }, [ syncPlay ]);
 
+    // Fired when the Manager refetches group info after a join/leave (e.g. the server
+    // reassigned the host); the refreshed info is a new object, so this re-renders.
+    const onGroupInfoUpdate = useCallback(() => {
+        setCurrentGroup(syncPlay?.Manager.getGroupInfo() ?? undefined);
+    }, [ syncPlay ]);
+
     useEffect(() => {
         if (!syncPlay) return;
 
         Events.on(syncPlay.Manager, 'enabled', updateSyncPlayGroup);
+        Events.on(syncPlay.Manager, 'group-info-update', onGroupInfoUpdate);
 
         return () => {
             Events.off(syncPlay.Manager, 'enabled', updateSyncPlayGroup);
+            Events.off(syncPlay.Manager, 'group-info-update', onGroupInfoUpdate);
         };
-    }, [ updateSyncPlayGroup, syncPlay ]);
+    }, [ updateSyncPlayGroup, onGroupInfoUpdate, syncPlay ]);
 
     const menuItems = [];
     if (isSyncPlayEnabled) {
