@@ -1206,6 +1206,8 @@
     "MessageSyncPlayIsDisabled": "Permission required to use SyncPlay.",
     "MessageSyncPlayJoinGroupDenied": "Cannot join group.",
     "MessageSyncPlayJoiningGroup": "Joining watch party…",
+    "MessageSyncPlayInviteReady": "You're invited to a watch party!",
+    "ButtonSyncPlayJoinParty": "Join watch party",
     "MessageSyncPlayLibraryAccessDenied": "Access to this content is restricted.",
     "MessageSyncPlayNoGroupsAvailable": "No groups available. Start playing something first.",
     "MessageSyncPlayPlaybackPermissionRequired": "Playback permission required.",

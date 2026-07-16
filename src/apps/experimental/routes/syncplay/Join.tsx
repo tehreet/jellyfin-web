@@ -1,4 +1,4 @@
-import React, { type FC, useEffect, useRef } from 'react';
+import React, { type FC, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import Page from 'components/Page';
@@ -7,6 +7,25 @@ import toast from 'components/toast/toast';
 import { useApi } from 'hooks/useApi';
 import globalize from 'lib/globalize';
 import { PluginType } from 'types/plugin';
+
+import '../../../../elements/emby-button/emby-button';
+
+/**
+ * Whether this document already carries sticky user activation -- the signal
+ * browsers' autoplay policies key off. A guest opening an invite link from
+ * outside (Discord, iMessage) lands on a document with NO activation, so the
+ * join flow's eventual video.play() is rejected with NotAllowedError and the
+ * player dies before it starts (surfaced to the user as a "no valid media
+ * source" playback error; a refresh "fixes" it only because dismissing that
+ * error dialog was itself the missing interaction). If the user had to log in
+ * first, typing counts and no extra click is needed.
+ */
+function hasUserActivation(): boolean {
+    const activation = (navigator as Navigator & { userActivation?: { hasBeenActive: boolean } }).userActivation;
+    // No API -> assume no activation and require the click; the cost is one
+    // tap, versus a guaranteed-dead player if the guess is wrong.
+    return activation ? activation.hasBeenActive : false;
+}
 
 interface SyncPlayQueueCoreLike {
     startPlayback: (apiClient: unknown) => void
@@ -61,11 +80,24 @@ const SyncPlayJoinPage: FC = () => {
     const { api } = useApi();
     const hasRedirected = useRef(false);
 
+    // Evaluated once on mount: sticky activation never goes away, and re-checking on
+    // re-renders would flip the page from button to spinner mid-interaction.
+    const [ needsGesture, setNeedsGesture ] = useState(() => !hasUserActivation());
+
+    const onJoinClick = useCallback(() => setNeedsGesture(false), []);
+
     const groupId = searchParams.get('groupId');
     const itemId = searchParams.get('itemId') ?? undefined;
 
     useEffect(() => {
         let isCancelled = false;
+
+        // Don't join yet -- everything downstream of the join (attach, seek, unpause)
+        // assumes it can start playback, which the browser will reject without a
+        // gesture. The join button's click re-runs this effect with activation present.
+        if (needsGesture) {
+            return;
+        }
 
         const redirectToLanding = () => {
             if (hasRedirected.current) return;
@@ -211,7 +243,7 @@ const SyncPlayJoinPage: FC = () => {
         return () => {
             isCancelled = true;
         };
-    }, [ api, groupId, itemId, navigate ]);
+    }, [ api, groupId, itemId, navigate, needsGesture ]);
 
     return (
         <Page
@@ -221,7 +253,22 @@ const SyncPlayJoinPage: FC = () => {
             isBackButtonEnabled={false}
         >
             <div className='padded-left padded-right padded-bottom-page' style={{ textAlign: 'center' }}>
-                <h2>{globalize.translate('MessageSyncPlayJoiningGroup')}</h2>
+                {needsGesture ? (
+                    <>
+                        <h2>{globalize.translate('MessageSyncPlayInviteReady')}</h2>
+                        <button
+                            is='emby-button'
+                            type='button'
+                            className='raised button-submit block'
+                            style={{ maxWidth: '20em', margin: '0 auto' }}
+                            onClick={onJoinClick}
+                        >
+                            {globalize.translate('ButtonSyncPlayJoinParty')}
+                        </button>
+                    </>
+                ) : (
+                    <h2>{globalize.translate('MessageSyncPlayJoiningGroup')}</h2>
+                )}
             </div>
         </Page>
     );
