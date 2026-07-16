@@ -2371,7 +2371,7 @@ export class PlaybackManager {
 
             return runInterceptors(item, playOptions)
                 .catch(onInterceptorRejection)
-                .then(() => detectBitrate(apiClient, item, mediaType))
+                .then(() => detectBitrateWithTimeout(apiClient, item, mediaType))
                 .then((bitrate) => {
                     return playAfterBitrateDetect(bitrate, item, playOptions, onPlaybackStartedFn, prevSource)
                         .catch(onPlaybackRejection);
@@ -2593,6 +2593,26 @@ export class PlaybackManager {
                         });
                 })
                 .catch(() => getSavedMaxStreamingBitrate(apiClient, mediaType));
+        }
+
+        function detectBitrateWithTimeout(apiClient, item, mediaType) {
+            // Seen live (2026-07-15): a playback start hung forever with the three
+            // Playback/BitrateTest requests as the last network activity - the
+            // detection promise never settled, so PlaybackInfo was never requested.
+            // The apiclient's per-request 5s XHR timeouts don't help when the
+            // browser's network stack itself is wedged (no XHR event ever fires),
+            // so bound the whole detection with a plain timer and fall back to the
+            // saved bitrate.
+            let timerId;
+            return Promise.race([
+                detectBitrate(apiClient, item, mediaType).finally(() => clearTimeout(timerId)),
+                new Promise((resolve) => {
+                    timerId = setTimeout(() => {
+                        console.warn('[playbackmanager] bitrate detection timed out, falling back to saved bitrate');
+                        resolve(getSavedMaxStreamingBitrate(apiClient, mediaType));
+                    }, 20000);
+                })
+            ]);
         }
 
         function playAfterBitrateDetect(maxBitrate, item, playOptions, onPlaybackStartedFn, prevSource) {

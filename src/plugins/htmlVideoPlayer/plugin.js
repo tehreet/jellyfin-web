@@ -149,6 +149,12 @@ function zoomIn(elem) {
         dom.addEventListener(elem, dom.whichAnimationEvent(), resolve, {
             once: true
         });
+        // Proven live (2026-07-15): Chrome pauses CSS animations for hidden or
+        // occluded pages, so animationend may NEVER fire - and this promise used
+        // to gate the whole playback start (createMediaElement -> play), hanging
+        // it forever before the source was even set. Never let a cosmetic zoom
+        // block playback: resolve after the animation should have finished.
+        setTimeout(resolve, duration + 500);
     });
 }
 
@@ -293,6 +299,14 @@ export class HtmlVideoPlayer {
      * @type {number | null | undefined}
      */
     #currentTime;
+    /**
+     * @type {ReturnType<typeof setInterval> | null | undefined}
+     */
+    #stallWatchdogTimer;
+    /**
+     * @type {number}
+     */
+    #stallWatchdogNudges = 0;
 
     /**
      * @private (used in other files)
@@ -533,6 +547,9 @@ export class HtmlVideoPlayer {
         }
 
         if (enableHlsJsPlayerForCodecs(options.mediaSource, 'Video') && isHls(options.mediaSource)) {
+            // Started before setSrcWithHlsJs because its promise stays pending for
+            // the whole stall (video.play() never settles at readyState 0)
+            this.startStallWatchdog(elem);
             return this.setSrcWithHlsJs(elem, options, val);
         } else if (options.playMethod !== 'Transcode' && options.mediaSource.Container?.toUpperCase() === 'FLV') {
             return this.setSrcWithFlvJs(elem, options, val);
@@ -548,8 +565,79 @@ export class HtmlVideoPlayer {
             return applySrc(elem, val, options).then(() => {
                 this.#currentSrc = val;
 
+                this.startStallWatchdog(elem);
                 return playWithPromise(elem, this.onError);
             });
+        }
+    }
+
+    /**
+     * Watchdog for playback starts that wedge at readyState 0.
+     *
+     * Seen live (2026-07-15, Chrome vs the production server): playback begins
+     * (video.paused === false), the manifest/segments may even download fine,
+     * but the element never leaves readyState 0 and currentTime stays frozen --
+     * on both plain playback and SyncPlay joins, while the server is provably
+     * healthy. hls.js's own gap/nudge handling never engages because it requires
+     * the media element to have loaded metadata first. The one proven manual
+     * unstick is assigning video.currentTime (a small nudge), which forces the
+     * media pipeline to re-sync to the buffer; encode exactly that.
+     * @private
+     */
+    startStallWatchdog(elem) {
+        this.stopStallWatchdog();
+        this.#stallWatchdogNudges = 0;
+
+        this.#stallWatchdogTimer = setInterval(() => {
+            // The element was torn down or replaced behind us
+            if (elem !== this.#mediaElement || !this._currentPlayOptions) {
+                this.stopStallWatchdog();
+                return;
+            }
+
+            if (elem.readyState > 0) {
+                if (this.#stallWatchdogNudges > 0) {
+                    console.warn(`PlaybackStallWatchdog: media recovered (readyState ${elem.readyState}) after ${this.#stallWatchdogNudges} nudge(s)`);
+                }
+                this.stopStallWatchdog();
+                return;
+            }
+
+            // Not our stall signature (autoplay blocked etc.) - keep waiting
+            if (elem.paused) {
+                return;
+            }
+
+            if (this.#stallWatchdogNudges >= 3) {
+                console.error('PlaybackStallWatchdog: still stuck at readyState 0 after 3 nudges, giving up (existing error/retry paths take over)');
+                this.stopStallWatchdog();
+                return;
+            }
+
+            this.#stallWatchdogNudges++;
+
+            // Prefer seeking to the pending start position (both were proven manual
+            // unsticks): nudging 0 -> 0.1 would otherwise defeat seekOnPlaybackStart,
+            // which only seeks resume positions when currentTime is exactly 0.
+            const startSeconds = (this._currentPlayOptions.playerStartPositionTicks || 0) / 10000000;
+            const target = (elem.currentTime === 0 && startSeconds > 0) ? startSeconds : elem.currentTime + 0.1;
+
+            console.warn(`PlaybackStallWatchdog: readyState stuck at 0 while playing, nudging currentTime ${elem.currentTime} -> ${target} (attempt ${this.#stallWatchdogNudges})`);
+            try {
+                elem.currentTime = target;
+            } catch (err) {
+                console.error('PlaybackStallWatchdog: currentTime nudge failed', err);
+            }
+        }, 10000);
+    }
+
+    /**
+     * @private
+     */
+    stopStallWatchdog() {
+        if (this.#stallWatchdogTimer) {
+            clearInterval(this.#stallWatchdogTimer);
+            this.#stallWatchdogTimer = null;
         }
     }
 
@@ -849,6 +937,7 @@ export class HtmlVideoPlayer {
 
     destroy() {
         this.setSubtitleOffset.cancel();
+        this.stopStallWatchdog();
 
         destroyHlsPlayer(this);
         destroyFlvPlayer(this);
