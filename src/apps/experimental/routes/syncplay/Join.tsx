@@ -1,4 +1,4 @@
-import React, { type FC, useCallback, useEffect, useRef, useState } from 'react';
+import React, { type FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import Page from 'components/Page';
@@ -88,6 +88,31 @@ const SyncPlayJoinPage: FC = () => {
 
     const groupId = searchParams.get('groupId');
     const itemId = searchParams.get('itemId') ?? undefined;
+
+    /**
+     * The same invite as a `jellyfin://` link, which the desktop app registers
+     * as a protocol handler and resolves against its OWN configured server --
+     * the link carries only the route, never an origin.
+     */
+    const appLink = useMemo(() => {
+        if (!groupId) return undefined;
+        // eslint-disable-next-line compat/compat
+        const params = new URLSearchParams({ groupId });
+        if (itemId) params.set('itemId', itemId);
+        return `jellyfin://syncplay/join?${params.toString()}`;
+    }, [ groupId, itemId ]);
+
+    /**
+     * `window.NativeShell` is injected only by a native client shell, so its
+     * absence means a plain browser -- the one case where offering the hand-off
+     * makes sense. Inside the app the link would just re-enter the app we are
+     * already in.
+     *
+     * The browser button is ALWAYS kept alongside it: `jellyfin://` is dead
+     * text on a machine without the app installed, and silently swallowing an
+     * invite is worse than a lower-quality stream.
+     */
+    const offerAppHandoff = !window.NativeShell && !!appLink;
 
     useEffect(() => {
         let isCancelled = false;
@@ -256,14 +281,35 @@ const SyncPlayJoinPage: FC = () => {
                 {needsGesture ? (
                     <>
                         <h2>{globalize.translate('MessageSyncPlayInviteReady')}</h2>
+                        {/* Deliberately NOT is='emby-button': React's createElement(_, {is})
+                            trips over the webcomponents polyfill in this bundle (crashes the
+                            whole route render). The emby-button *class* carries the styling. */}
+                        {offerAppHandoff && (
+                            <>
+                                <button
+                                    type='button'
+                                    className='emby-button raised button-submit block'
+                                    style={{ maxWidth: '20em', margin: '0 auto' }}
+                                    onClick={() => {
+                                        window.location.href = appLink;
+                                    }}
+                                >
+                                    {globalize.translate('ButtonSyncPlayOpenInApp')}
+                                </button>
+                                <p style={{ maxWidth: '24em', margin: '0.75em auto 1.5em', opacity: 0.7 }}>
+                                    {globalize.translate('MessageSyncPlayOpenInAppHint')}
+                                </p>
+                            </>
+                        )}
                         <button
-                            is='emby-button'
                             type='button'
-                            className='raised button-submit block'
+                            className={`emby-button raised block${offerAppHandoff ? '' : ' button-submit'}`}
                             style={{ maxWidth: '20em', margin: '0 auto' }}
                             onClick={onJoinClick}
                         >
-                            {globalize.translate('ButtonSyncPlayJoinParty')}
+                            {globalize.translate(
+                                offerAppHandoff ? 'ButtonSyncPlayJoinInBrowser' : 'ButtonSyncPlayJoinParty'
+                            )}
                         </button>
                     </>
                 ) : (
