@@ -5,7 +5,6 @@
 
 import globalize from '../../../lib/globalize';
 import toast from '../../../components/toast/toast';
-import { appRouter } from '../../../components/router/appRouter';
 import * as Helper from './Helper';
 import Events from '../../../utils/events.ts';
 
@@ -276,25 +275,6 @@ class QueueCore {
             console.error(error);
             toast(globalize.translate('MessageSyncPlayErrorMedia'));
         });
-
-        // Land on the video OSD right away instead of waiting for the player's first
-        // 'playing' event (htmlVideoPlayer only navigates there once video data actually
-        // arrives). A slow-starting stream (cold NAS disk, transcoder spin-up) otherwise
-        // strands the user behind a fullscreen, chrome-less <video> element with no OSD,
-        // no controls and no way back for as long as the load takes -- forever, if it
-        // never recovers. The OSD tolerates a not-yet-attached player: it binds on
-        // 'playerchange' once the real player goes live. Media type is looked up first so
-        // audio-only queues don't get hijacked onto the video route.
-        const currentItemId = this.getCurrentItemId();
-        if (currentItemId) {
-            apiClient.getItem(apiClient.getCurrentUserId(), currentItemId).then((item) => {
-                if (item?.MediaType === 'Video' && this.manager.isFollowingGroupPlayback()) {
-                    appRouter.showVideoOsd();
-                }
-            }).catch(() => {
-                // Best-effort: htmlVideoPlayer still navigates on 'playing' as before.
-            });
-        }
     }
 
     /**
