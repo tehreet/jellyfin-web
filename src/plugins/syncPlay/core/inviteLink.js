@@ -51,8 +51,14 @@ export async function getSyncPlayInviteLink(syncPlayManager, groupName) {
         await syncPlayManager.createGroupExplicit(groupName);
 
         if (itemId) {
-            // Queues the item into the fresh group without unpausing.
-            await syncPlayManager.getController().play({ ids: [itemId] });
+            // Queues the item into the fresh group without unpausing, at the host's current
+            // position -- otherwise creating a group mid-movie restarts it from 0.
+            const player = playbackManager.getCurrentPlayer();
+            const startPositionTicks = (player && playbackManager.currentTime(player) * 10000) || 0;
+            await syncPlayManager.getController().play({
+                ids: [itemId],
+                startPositionTicks: Math.round(startPositionTicks)
+            });
         }
     }
 
