@@ -26,3 +26,37 @@ export function getSetting(name) {
 export function setSetting(name, value) {
     return appSettings.set(name, value, PREFIX);
 }
+
+/**
+ * Gets the persisted reference to the last SyncPlay group the user joined, so it can be
+ * restored after something drops the WebSocket connection without an explicit "leave"
+ * (e.g. a page reload, or a mobile browser/app backgrounding the tab).
+ * @returns {{serverId: string, groupId: string}|null} The persisted group reference, or `null` if none is stored.
+ */
+export function getLastGroup() {
+    const serverId = getSetting('lastGroupServerId');
+    const groupId = getSetting('lastGroupId');
+
+    if (!serverId || !groupId) {
+        return null;
+    }
+
+    return { serverId, groupId };
+}
+
+/**
+ * Persists the currently joined SyncPlay group, so it can be restored later.
+ * @param {string} serverId The id of the server the group belongs to.
+ * @param {string} groupId The id of the joined group.
+ */
+export function setLastGroup(serverId, groupId) {
+    setSetting('lastGroupServerId', serverId || '');
+    setSetting('lastGroupId', groupId || '');
+}
+
+/**
+ * Clears the persisted SyncPlay group reference (e.g. after the user explicitly leaves a group).
+ */
+export function clearLastGroup() {
+    setLastGroup('', '');
+}

@@ -5,7 +5,9 @@
 
 import globalize from '../../../lib/globalize';
 import toast from '../../../components/toast/toast';
+import { appRouter } from '../../../components/router/appRouter';
 import * as Helper from './Helper';
+import Events from '../../../utils/events.ts';
 
 /**
  * Class that manages the queue of SyncPlay.
@@ -103,6 +105,13 @@ class QueueCore {
                     console.error('SyncPlay updatePlayQueue: unknown reason for update:', newPlayQueue.Reason);
                     break;
             }
+
+            // Fired once this specific update has been fully applied (playlist/current-item
+            // state above is already up to date), regardless of Reason -- consumed by e.g. the
+            // magic-link Join page, which needs to know when the queue snapshot that follows a
+            // fresh 'GroupJoined' has actually landed before deciding whether it joined an
+            // active group (non-empty queue) or a genuine empty waiting room.
+            Events.trigger(this.manager, 'queue-update', [newPlayQueue]);
         }).catch((error) => {
             console.warn('SyncPlay updatePlayQueue:', error);
         });
@@ -169,6 +178,7 @@ class QueueCore {
     scheduleReadyRequestOnPlaybackStart(apiClient, origin) {
         Helper.waitForEventOnce(this.manager, 'playbackstart', Helper.WaitForEventDefaultTimeout, ['playbackerror']).then(async () => {
             console.debug('SyncPlay scheduleReadyRequestOnPlaybackStart: local pause and notify server.');
+            this.playbackStartRetried = false;
             const playerWrapper = this.manager.getPlayerWrapper();
             playerWrapper.localPause();
 
@@ -188,6 +198,22 @@ class QueueCore {
             });
         }).catch((error) => {
             console.error('Error while waiting for `playbackstart` event!', origin, error);
+
+            // A media element that stalls on its very first load (e.g. the file lives on a
+            // NAS share whose disks were asleep and the first byte-range request died) never
+            // fires 'playing' NOR 'error': it just sits at readyState 0 forever, leaving a
+            // chrome-less fullscreen <video> the user cannot escape. htmlVideoPlayer reuses
+            // its existing media element on a new play() call, so re-issuing startPlayback()
+            // replaces the dead load with a fresh request (by now the share is typically
+            // awake). One retry only -- a second timeout falls through to the halt below.
+            if (origin === 'startPlayback' && !this.playbackStartRetried && this.manager.isFollowingGroupPlayback()) {
+                this.playbackStartRetried = true;
+                console.warn('SyncPlay scheduleReadyRequestOnPlaybackStart: playback start stalled, retrying once.');
+                toast(globalize.translate('MessageSyncPlayRetryingPlayback'));
+                this.startPlayback(apiClient, { isRetry: true });
+                return;
+            }
+
             if (!this.manager.isSyncPlayEnabled()) {
                 toast(globalize.translate('MessageSyncPlayErrorMedia'));
             }
@@ -200,7 +226,11 @@ class QueueCore {
      * Prepares this client for playback by loading the group's content.
      * @param {Object} apiClient The ApiClient.
      */
-    startPlayback(apiClient) {
+    startPlayback(apiClient, { isRetry = false } = {}) {
+        if (!isRetry) {
+            this.playbackStartRetried = false;
+        }
+
         if (!this.manager.isFollowingGroupPlayback()) {
             console.debug('SyncPlay startPlayback: ignoring, not following playback.');
             return Promise.reject();
@@ -234,11 +264,37 @@ class QueueCore {
             ids: this.getPlaylistAsItemIds(),
             startPositionTicks: startPositionTicks,
             startIndex: this.getCurrentPlaylistIndex(),
-            serverId: serverId
+            serverId: serverId,
+            // On a stall retry, ask the server for a transcoded (HLS) source instead of
+            // repeating the native/progressive direct-play load that just went nowhere.
+            // HLS feeds the player through fetch()+MediaSource, which works even when
+            // the browser's native media URL loader is the thing that's broken (observed
+            // live: a wedged Chrome media loader stalls EVERY direct-play load at
+            // readyState 0 machine-wide, while fetch/MSE playback is unaffected).
+            ...(isRetry ? { enableDirectPlay: false, enableDirectStream: false } : {})
         }).catch((error) => {
             console.error(error);
             toast(globalize.translate('MessageSyncPlayErrorMedia'));
         });
+
+        // Land on the video OSD right away instead of waiting for the player's first
+        // 'playing' event (htmlVideoPlayer only navigates there once video data actually
+        // arrives). A slow-starting stream (cold NAS disk, transcoder spin-up) otherwise
+        // strands the user behind a fullscreen, chrome-less <video> element with no OSD,
+        // no controls and no way back for as long as the load takes -- forever, if it
+        // never recovers. The OSD tolerates a not-yet-attached player: it binds on
+        // 'playerchange' once the real player goes live. Media type is looked up first so
+        // audio-only queues don't get hijacked onto the video route.
+        const currentItemId = this.getCurrentItemId();
+        if (currentItemId) {
+            apiClient.getItem(apiClient.getCurrentUserId(), currentItemId).then((item) => {
+                if (item?.MediaType === 'Video' && this.manager.isFollowingGroupPlayback()) {
+                    appRouter.showVideoOsd();
+                }
+            }).catch(() => {
+                // Best-effort: htmlVideoPlayer still navigates on 'playing' as before.
+            });
+        }
     }
 
     /**
@@ -281,6 +337,20 @@ class QueueCore {
         } else {
             return null;
         }
+    }
+
+    /**
+     * Gets the item id (the underlying media item, as opposed to the playlist entry id
+     * returned by getCurrentPlaylistItemId()) of the currently playing/queued item.
+     * @returns {string|null} The item id, or null if nothing is queued.
+     */
+    getCurrentItemId() {
+        if (!this.lastPlayQueueUpdate) {
+            return null;
+        }
+
+        const index = this.lastPlayQueueUpdate.PlayingItemIndex;
+        return index === -1 ? null : (this.playlist[index]?.Id ?? null);
     }
 
     /**

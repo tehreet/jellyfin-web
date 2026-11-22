@@ -6,7 +6,7 @@ import { pluginManager } from 'components/pluginManager';
 import { PluginType } from 'constants/pluginType';
 import Events, { type Event } from 'utils/events';
 
-interface SyncPlayInstance {
+export interface SyncPlayInstance {
     Manager: {
         getGroupInfo: () => GroupInfoDto | null | undefined
         getTimeSyncCore: () => object
@@ -14,6 +14,9 @@ interface SyncPlayInstance {
         isPlaylistEmpty: () => boolean
         haltGroupPlayback: (apiClient: ApiClient) => void
         resumeGroupPlayback: (apiClient: ApiClient) => void
+        getHostUsername: () => string | null
+        isLocalClientBuffering: () => boolean
+        isGroupBuffering: () => boolean
     }
 }
 

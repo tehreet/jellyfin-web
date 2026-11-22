@@ -6,8 +6,8 @@ import { MediaSegmentAction } from '../constants/mediaSegmentAction';
 
 const PREFIX = 'segmentTypeAction';
 const DEFAULT_ACTIONS: Partial<Record<MediaSegmentType, MediaSegmentAction>> = {
-    [MediaSegmentType.Intro]: MediaSegmentAction.AskToSkip,
-    [MediaSegmentType.Outro]: MediaSegmentAction.AskToSkip
+    [MediaSegmentType.Intro]: MediaSegmentAction.Skip,
+    [MediaSegmentType.Outro]: MediaSegmentAction.Skip
 };
 
 export const getId = (type: MediaSegmentType) => `${PREFIX}__${type}`;

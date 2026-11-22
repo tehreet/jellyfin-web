@@ -66,7 +66,7 @@ class PlaybackCore {
         this.useSkipToSync = toBoolean(getSetting('useSkipToSync'), true);
 
         // Whether sync correction during playback is active.
-        this.enableSyncCorrection = toBoolean(getSetting('enableSyncCorrection'), false);
+        this.enableSyncCorrection = toBoolean(getSetting('enableSyncCorrection'), true);
     }
 
     /**
@@ -114,6 +114,8 @@ class PlaybackCore {
     onReady() {
         this.playerIsBuffering = false;
         this.sendBufferingRequest(false);
+        console.debug('SyncPlay onReady: local client is done buffering.');
+        // Consumed by Manager/UI (e.g. SyncPlayMenu) to clear per-participant buffering indicators.
         Events.trigger(this.manager, 'ready');
     }
 
@@ -123,6 +125,8 @@ class PlaybackCore {
     onBuffering() {
         this.playerIsBuffering = true;
         this.sendBufferingRequest(true);
+        console.debug('SyncPlay onBuffering: local client is buffering, notifying group.');
+        // Consumed by Manager/UI (e.g. SyncPlayMenu) to surface a per-participant buffering indicator.
         Events.trigger(this.manager, 'buffering');
     }
 
@@ -163,6 +167,39 @@ class PlaybackCore {
      */
     isBuffering() {
         return this.playerIsBuffering;
+    }
+
+    /**
+     * Called after (re)joining a group to proactively confirm readiness when the local
+     * player is already attached and not buffering, instead of relying exclusively on a
+     * DOM buffering->ready event cycle (onBuffering()/onReady() above) that may never fire.
+     *
+     * The server unconditionally flags every (re)joining session as buffering and moves the
+     * whole group to Waiting (see WaitingGroupState.SessionJoined() server-side), expecting
+     * that session to eventually send a Ready confirmation via sendBufferingRequest(false).
+     * A session whose video is already playing smoothly at the moment it (re)joins - e.g. a
+     * WebSocket reconnect silently rejoining an already-playing host through
+     * Manager.restoreLastGroup() - will never get a 'waiting'->'playing' DOM transition to
+     * trigger that confirmation, since none of its playback state is actually changing. Left
+     * unhandled, that permanently strands the whole group in Waiting on a phantom buffering
+     * participant. Only confirms readiness when the local state genuinely already indicates
+     * it: if the player is not attached yet, or is already flagged as buffering (a real
+     * 'waiting' DOM event fired and 'playing' hasn't yet), this intentionally does nothing
+     * and leaves onReady() to send the confirmation once it actually happens.
+     */
+    confirmReadyIfAlreadyPlaying() {
+        if (!this.manager.isPlaybackActive()) {
+            // No player attached/loaded locally yet; nothing to confirm.
+            return;
+        }
+
+        if (this.isBuffering()) {
+            // Genuinely (still) buffering per the last DOM event; let onReady() handle it.
+            return;
+        }
+
+        console.debug('SyncPlay confirmReadyIfAlreadyPlaying: player is already ready, proactively confirming.');
+        this.sendBufferingRequest(false);
     }
 
     /**

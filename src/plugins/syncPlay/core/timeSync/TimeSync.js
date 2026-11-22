@@ -10,7 +10,7 @@ import Events from '../../../../utils/events.ts';
  */
 const NumberOfTrackedMeasurements = 8;
 const PollingIntervalGreedy = 1000; // milliseconds
-const PollingIntervalLowProfile = 60000; // milliseconds
+const PollingIntervalLowProfile = 15000; // milliseconds
 const GreedyPingCount = 3;
 
 /**

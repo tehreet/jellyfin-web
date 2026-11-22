@@ -4,6 +4,7 @@
  */
 
 import * as Helper from './Helper';
+import { getLastGroup, setLastGroup, clearLastGroup } from './Settings';
 import TimeSyncCore from './timeSync/TimeSyncCore';
 import PlaybackCore from './PlaybackCore';
 import QueueCore from './QueueCore';
@@ -38,6 +39,24 @@ class Manager {
         this.followingGroupPlayback = true; // Follow or ignore group playback.
         this.lastPlaybackCommand = null; // Last received playback command from server, tracks state of group.
 
+        this.groupPlaybackState = null; // Latest known group playback state (Idle/Waiting/Paused/Playing).
+        this.groupPlaybackStateReason = null; // Reason for the latest group playback state.
+
+        this.localUsername = null; // Best-effort username of the local user, used for the host-lock convention.
+
+        // The group's host is the session that created it, per the server-provided
+        // GroupInfoDto.HostUsername field (set once at creation, never reassigned). With
+        // the lock disabled it is display-only (participant list). The lock proved harmful
+        // in practice: HostUsername is never reassigned when the host leaves, so a group
+        // that outlives its creator becomes permanently uncontrollable for everyone in it.
+        this.hostLockEnabled = false;
+
+        // Set while an explicit join/create request (from the magic-link Join page or the
+        // "copy invite link" flow) is in flight, so the background restoreLastGroup() logic
+        // (below) can detect it and defer instead of racing it. See joinGroupExplicit(),
+        // beginExplicitGroupChange() and endExplicitGroupChange().
+        this.explicitGroupChangeInFlight = false;
+
         this.currentPlayer = null;
         this.playerWrapper = null;
     }
@@ -67,6 +86,13 @@ class Manager {
                 });
             }
         });
+
+        // Attempt to silently rejoin the last SyncPlay group whenever the WebSocket
+        // (re)connects, e.g. on app boot, after a page reload, or when a mobile app
+        // resumes from the background and reopens its connection.
+        Events.on(apiClient, 'websocketopen', () => {
+            this.restoreLastGroup(apiClient);
+        });
     }
 
     /**
@@ -79,6 +105,148 @@ class Manager {
         }
 
         this.apiClient = apiClient;
+        this.localUsername = null;
+
+        // Best-effort resolution of the local username, used by the host-lock convention.
+        if (apiClient.getCurrentUserId()) {
+            apiClient.getCurrentUser().then((user) => {
+                this.localUsername = user?.Name ?? null;
+            }).catch((error) => {
+                console.error('SyncPlay updateApiClient: failed to resolve current username.', error);
+            });
+        }
+    }
+
+    /**
+     * Attempts to silently rejoin the last SyncPlay group the user was part of, provided
+     * the ApiClient belongs to the same server and the group still exists.
+     *
+     * This defers entirely to any explicit join/create currently in flight (see
+     * beginExplicitGroupChange()/endExplicitGroupChange()) -- e.g. the magic-link Join page
+     * or the "copy invite link" flow -- since those already cover "user is (re)connecting"
+     * and must win any race against this silent background rejoin. The guard is checked
+     * both up front and again right before actually issuing the rejoin request, since this
+     * method's extra getSyncPlayGroups() round trip means an explicit request that started
+     * later can easily finish first.
+     * @param {Object} apiClient The ApiClient.
+     */
+    restoreLastGroup(apiClient) {
+        if (this.isSyncPlayEnabled() || this.hasExplicitGroupChangeInFlight()) {
+            return;
+        }
+
+        const lastGroup = getLastGroup();
+        if (!lastGroup || lastGroup.serverId !== apiClient.serverId()) {
+            return;
+        }
+
+        apiClient.getSyncPlayGroups().then((response) => response.json()).then((groups) => {
+            if (this.isSyncPlayEnabled() || this.hasExplicitGroupChangeInFlight()) {
+                console.debug('SyncPlay restoreLastGroup: an explicit join/create is now in flight, skipping silent rejoin.');
+                return;
+            }
+
+            const groupStillExists = groups.some((group) => group.GroupId === lastGroup.groupId);
+            if (groupStillExists) {
+                console.debug(`SyncPlay restoreLastGroup: rejoining group ${lastGroup.groupId}.`);
+                apiClient.joinSyncPlayGroup({
+                    GroupId: lastGroup.groupId
+                });
+            } else {
+                console.debug(`SyncPlay restoreLastGroup: group ${lastGroup.groupId} no longer exists.`);
+                clearLastGroup();
+            }
+        }).catch((error) => {
+            console.error('SyncPlay restoreLastGroup: failed to look up SyncPlay groups.', error);
+        });
+    }
+
+    /**
+     * Marks an explicit join/create request (originating from the magic-link Join page or
+     * the "copy invite link" flow) as in flight, so restoreLastGroup() defers to it instead
+     * of racing it. Must be paired with a matching endExplicitGroupChange() call once the
+     * request settles (success, failure, mismatch, or timeout).
+     */
+    beginExplicitGroupChange() {
+        this.explicitGroupChangeInFlight = true;
+    }
+
+    /**
+     * Clears the explicit join/create in-flight marker set by beginExplicitGroupChange().
+     */
+    endExplicitGroupChange() {
+        this.explicitGroupChangeInFlight = false;
+    }
+
+    /**
+     * Whether an explicit join/create request is currently in flight.
+     * @returns {boolean} _true_ if an explicit join/create is in flight, _false_ otherwise.
+     */
+    hasExplicitGroupChangeInFlight() {
+        return this.explicitGroupChangeInFlight;
+    }
+
+    /**
+     * Explicitly joins a SyncPlay group (as opposed to the background restoreLastGroup()
+     * rejoin), coordinating with it via beginExplicitGroupChange()/endExplicitGroupChange()
+     * so the two can never race each other, and verifying that the group actually joined
+     * matches the one requested before resolving.
+     * @param {string} groupId The GroupId to join.
+     * @returns {Promise} A Promise that resolves once `groupId` has actually been joined, or
+     * rejects if a different group was joined instead, the request failed, or it timed out.
+     */
+    joinGroupExplicit(groupId) {
+        // Already in the requested group (e.g. the user opened their own invite link):
+        // nothing to do, and no new 'GroupJoined'/'enabled' event will fire to wait on.
+        if (this.isSyncPlayEnabled() && this.getGroupInfo()?.GroupId === groupId) {
+            return Promise.resolve();
+        }
+
+        const apiClient = this.getApiClient();
+
+        this.beginExplicitGroupChange();
+
+        const waitForMatchingGroup = Helper.waitForEventOnce(this, 'enabled', Helper.WaitForEventDefaultTimeout)
+            .then(() => {
+                const joinedGroupId = this.getGroupInfo()?.GroupId;
+                if (joinedGroupId !== groupId) {
+                    throw new Error(`SyncPlay joinGroupExplicit: joined group ${joinedGroupId} does not match requested group ${groupId}.`);
+                }
+            });
+
+        return apiClient.joinSyncPlayGroup({
+            GroupId: groupId
+        }).then(() => waitForMatchingGroup).finally(() => {
+            this.endExplicitGroupChange();
+        });
+    }
+
+    /**
+     * Explicitly creates a new SyncPlay group (as opposed to joining an existing one),
+     * coordinating with the background restoreLastGroup() rejoin via
+     * beginExplicitGroupChange()/endExplicitGroupChange() so a stale rejoin can never be
+     * mistaken for the newly-created group's 'enabled' event.
+     * @param {string} groupName The name to give the new group.
+     * @returns {Promise<string>} A Promise that resolves with the new group's GroupId.
+     */
+    createGroupExplicit(groupName) {
+        const apiClient = this.getApiClient();
+
+        this.beginExplicitGroupChange();
+
+        const waitForEnabled = Helper.waitForEventOnce(this, 'enabled', Helper.WaitForEventDefaultTimeout);
+
+        return apiClient.createSyncPlayGroup({
+            GroupName: groupName
+        }).then(() => waitForEnabled).then(() => {
+            const groupId = this.getGroupInfo()?.GroupId;
+            if (!groupId) {
+                throw new Error('SyncPlay createGroupExplicit: group was not created.');
+            }
+            return groupId;
+        }).finally(() => {
+            this.endExplicitGroupChange();
+        });
     }
 
     /**
@@ -228,10 +396,14 @@ class Manager {
                 Events.trigger(this, 'group-update', [ cmd.Data ]);
                 break;
             case 'StateUpdate':
+                this.groupPlaybackState = cmd.Data.State;
+                this.groupPlaybackStateReason = cmd.Data.Reason;
                 Events.trigger(this, 'group-state-update', [cmd.Data.State, cmd.Data.Reason]);
                 break;
             case 'GroupDoesNotExist':
                 toast(globalize.translate('MessageSyncPlayGroupDoesNotExist'));
+                // Stop trying to silently rejoin a group that no longer exists.
+                clearLastGroup();
                 break;
             case 'CreateGroupDenied':
                 toast(globalize.translate('MessageSyncPlayCreateGroupDenied'));
@@ -365,6 +537,18 @@ class Manager {
         if (this.isSyncPlayEnabled()) {
             if (groupInfo.GroupId === this.groupInfo.GroupId) {
                 console.debug(`SyncPlay enableSyncPlay: group ${this.groupInfo.GroupId} already joined.`);
+
+                // This is precisely what a background restoreLastGroup() rejoin (e.g. after a
+                // WebSocket reconnect) hits when the session was already enabled for this exact
+                // group: the server still unconditionally re-runs its SessionJoined handling
+                // (flagging this session as buffering and moving the group to Waiting) even
+                // though nothing actually changed here, and the resulting PlayQueue update is
+                // typically stale/dropped client-side too (see QueueCore.updatePlayQueue()'s
+                // LastUpdate guard) since the queue itself never changed. Without confirming
+                // readiness here, an already-playing host would be stuck forever as a phantom
+                // "buffering" participant with no DOM event or queue update left to clear it.
+                // See PlaybackCore.confirmReadyIfAlreadyPlaying() for the full explanation.
+                this.playbackCore.confirmReadyIfAlreadyPlaying();
                 return;
             } else {
                 console.warn(`SyncPlay enableSyncPlay: switching from group ${this.groupInfo.GroupId} to group ${groupInfo.GroupId}.`);
@@ -375,9 +559,18 @@ class Manager {
         }
 
         this.groupInfo = groupInfo;
+        setLastGroup(apiClient.serverId(), groupInfo.GroupId);
 
         this.syncPlayEnabledAt = groupInfo.LastUpdatedAt;
         this.playerWrapper.bindToPlayer();
+
+        // Covers an explicit join/create (joinGroupExplicit()/createGroupExplicit()) or a
+        // restoreLastGroup() rejoin into a group not already known client-side (the group-switch
+        // branch above, or a genuinely fresh join). Now that groupInfo/playerWrapper reflect the
+        // newly-joined group, confirm readiness if the local player already happens to be ready
+        // (e.g. it's still attached and not buffering from a prior group). See
+        // PlaybackCore.confirmReadyIfAlreadyPlaying() for details.
+        this.playbackCore.confirmReadyIfAlreadyPlaying();
 
         Events.trigger(this, 'enabled', [true]);
 
@@ -408,7 +601,10 @@ class Manager {
         this.followingGroupPlayback = true;
         this.lastPlaybackCommand = null;
         this.queuedCommand = null;
+        this.groupPlaybackState = null;
+        this.groupPlaybackStateReason = null;
         this.playbackCore.syncEnabled = false;
+        clearLastGroup();
         Events.trigger(this, 'enabled', [false]);
         this.playerWrapper.unbindFromPlayer();
 
@@ -431,6 +627,76 @@ class Manager {
      */
     getGroupInfo() {
         return this.groupInfo;
+    }
+
+    /**
+     * Gets the best-effort username of the local user.
+     * @returns {string|null} The local username, or null if not resolved yet.
+     */
+    getLocalUsername() {
+        return this.localUsername;
+    }
+
+    /**
+     * Gets the username of the group's host under the client-side host-lock convention.
+     *
+     * Backed by the server-provided GroupInfoDto.HostUsername field: the username of the
+     * session that created the group, set once at creation time and never reassigned
+     * afterward regardless of participant churn. (Previously this fell back to guessing
+     * from Participants[0], the earliest-joined participant, which is unreliable since that
+     * array's order/membership can change as people join and leave.)
+     * @returns {string|null} The host's username, or null if not in a group.
+     */
+    getHostUsername() {
+        return this.groupInfo?.HostUsername ?? null;
+    }
+
+    /**
+     * Whether the local user is the group's host.
+     * @returns {boolean} _true_ if the local user is the host, _false_ otherwise.
+     */
+    isSessionHost() {
+        const host = this.getHostUsername();
+        return !host || !this.localUsername || host === this.localUsername;
+    }
+
+    /**
+     * Checks whether the local user is allowed to control group playback (play/pause/seek)
+     * under the host-lock convention. Fails open (allows control) when SyncPlay is disabled,
+     * the lock is turned off, or the host/local identity is not known yet, so a transient
+     * lookup delay can never strand every participant with a frozen player.
+     * @returns {boolean} _true_ if playback control is allowed, _false_ otherwise.
+     */
+    isPlaybackControlAllowed() {
+        if (!this.isSyncPlayEnabled() || !this.hostLockEnabled) {
+            return true;
+        }
+
+        return this.isSessionHost();
+    }
+
+    /**
+     * Shows a toast informing the local user that only the host may control playback.
+     */
+    notifyPlaybackControlDenied() {
+        const host = this.getHostUsername();
+        toast(globalize.translate('MessageSyncPlayHostControlsPlayback', host ?? ''));
+    }
+
+    /**
+     * Whether the group is currently waiting on a participant to finish buffering.
+     * @returns {boolean} _true_ if the group is waiting on buffering, _false_ otherwise.
+     */
+    isGroupBuffering() {
+        return this.groupPlaybackState === 'Waiting' && this.groupPlaybackStateReason === 'Buffer';
+    }
+
+    /**
+     * Whether the local client's player is currently buffering.
+     * @returns {boolean} _true_ if this client is buffering, _false_ otherwise.
+     */
+    isLocalClientBuffering() {
+        return this.playbackCore.isBuffering();
     }
 
     /**
